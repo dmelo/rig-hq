@@ -54,6 +54,10 @@ The page is plain JavaScript on a `<canvas>`. All the art is drawn in code, so t
 - Only queue traffic shows as conversation. Plain `rig send` messages aren't recorded by the daemon, so they can't be shown.
 - Tested against OpenRig 0.6.x. The daemon's HTTP API isn't documented as stable, so a future version may need changes here.
 
+## Inspiration
+
+The idea of watching coding agents as pixel people in an office comes from [Pixel Agents](https://github.com/pixel-agents-hq/pixel-agents), which does this for Claude Code sessions. Rig HQ is a separate implementation built around OpenRig's model instead (rigs, pods, seats and their queue), so it can give every rig its own room and show Codex seats too. [claude-office](https://github.com/paulrobello/claude-office) and [Agent Virtual Office](https://github.com/KbWen/agent-virtual-office) explore the same idea. No code or art is taken from any of them.
+
 ## License
 
 [MIT](LICENSE)
