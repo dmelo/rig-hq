@@ -28,6 +28,8 @@ const HISTORY_WINDOW_MS = 6 * 3600 * 1000; // replayed conversations younger tha
 
 const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO };
 const history = []; // recent conversation events, oldest first
+const seenOutbox = new Set(); // outboxIds already turned into conversations
+let lastEventId = null; // last SSE id from the daemon, sent back as Last-Event-ID on reconnect
 const clients = new Set();
 
 // ---------------------------------------------------------------- daemon poll
@@ -99,6 +101,43 @@ function nudge() {
   if (!nudgeTimer) nudgeTimer = setTimeout(() => { nudgeTimer = null; poll(); }, 700);
 }
 
+// ----------------------------------------------------------------- rig send
+
+// `rig send` messages aren't in the event stream, but a send with a known
+// sender session is recorded in that sender's outbox (OpenRig 0.6.5). Poll each
+// seat's outbox and turn new entries into conversations.
+function outboxSummary(body) {
+  const parts = String(body ?? "").split(/\n---\n?/);
+  const text = (parts[1] ?? parts[0]).replace(/^[\w.-]+:\s*/, "").replace(/\s+/g, " ").trim();
+  return text.slice(0, 200);
+}
+
+let outboxPrimed = false;
+async function pollOutboxes() {
+  const sessions = state.rigs.flatMap((r) => r.seats.map((s) => s.session));
+  const fresh = [];
+  await Promise.all(sessions.map(async (session) => {
+    try {
+      const rows = await getJson(`/api/queue/outbox/list?senderSession=${encodeURIComponent(session)}&limit=5`);
+      for (const row of rows) {
+        if (!row.outboxId || seenOutbox.has(row.outboxId)) continue;
+        seenOutbox.add(row.outboxId);
+        const at = Date.parse(row.tsDispatched) || Date.now();
+        if (at < Date.now() - HISTORY_WINDOW_MS) continue;
+        fresh.push({ kind: "talk", verb: "says", from: row.senderSession, to: row.destinationSession, summary: outboxSummary(row.body), at });
+      }
+    } catch { /* a seat without an outbox, or a daemon hiccup: try again next round */ }
+  }));
+  fresh.sort((a, b) => a.at - b.at);
+  for (const t of fresh) {
+    history.push(t);
+    if (outboxPrimed) broadcast(t); // the first round is history, not news
+  }
+  history.sort((a, b) => a.at - b.at);
+  while (history.length > HISTORY) history.shift();
+  outboxPrimed = true;
+}
+
 // ------------------------------------------------------- daemon event stream
 
 // Daemon timestamps look like "2026-10-01 01:17:08" (UTC) or full ISO.
@@ -123,7 +162,10 @@ async function follow() {
   const started = Date.now();
   for (;;) {
     try {
-      const res = await fetch(DAEMON + "/api/events", { headers: { accept: "text/event-stream" } });
+      // OpenRig 0.6.5 resumes from Last-Event-ID; only the very first connect replays history.
+      const headers = { accept: "text/event-stream" };
+      if (lastEventId) headers["last-event-id"] = lastEventId;
+      const res = await fetch(DAEMON + "/api/events", { headers });
       if (!res.ok || !res.body) throw new Error(`events: HTTP ${res.status}`);
       const dec = new TextDecoder();
       let buf = "";
@@ -133,6 +175,7 @@ async function follow() {
         while ((i = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, i).trimEnd();
           buf = buf.slice(i + 1);
+          if (line.startsWith("id: ")) { lastEventId = line.slice(4).trim(); continue; }
           if (!line.startsWith("data: ")) continue;
           let ev;
           try { ev = JSON.parse(line.slice(6)); } catch { continue; }
@@ -196,7 +239,8 @@ if (DEMO) {
   const { startDemo } = await import("./demo.mjs");
   startDemo({ state, history, broadcast, HISTORY });
 } else {
-  poll();
+  poll().then(pollOutboxes);
   setInterval(poll, POLL_MS);
+  setInterval(pollOutboxes, 5000);
   follow();
 }

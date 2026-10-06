@@ -479,8 +479,13 @@ function draw(now) {
     if (pa && pb && age < TALK_MS) {
       const k = age / TALK_MS, e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
       const x = pa.x + (pb.x - pa.x) * e, y = pa.y + (pb.y - pa.y) * e - Math.sin(Math.PI * k) * 18;
-      R(x - 4, y - 3, 8, 6, "#f4efe2"); R(x - 4, y - 3, 8, 1, "#b9a98f");
-      R(x - 3, y - 2, 1, 1, "#b9a98f"); R(x + 2, y - 2, 1, 1, "#b9a98f"); R(x - 1, y - 1, 2, 1, "#c0392b");
+      if (t.verb === "says") { // rig send: a blue note
+        R(x - 3, y - 4, 7, 7, "#d6e6ff"); R(x - 3, y - 4, 7, 1, "#8fb0e0");
+        R(x - 2, y - 2, 5, 1, "#6d8fc4"); R(x - 2, y, 4, 1, "#6d8fc4");
+      } else { // queue handoff: an envelope
+        R(x - 4, y - 3, 8, 6, "#f4efe2"); R(x - 4, y - 3, 8, 1, "#b9a98f");
+        R(x - 3, y - 2, 1, 1, "#b9a98f"); R(x + 2, y - 2, 1, 1, "#b9a98f"); R(x - 1, y - 1, 2, 1, "#c0392b");
+      }
     }
     if (pa && age < BUBBLE_MS) {
       ctx.globalAlpha = age > BUBBLE_MS - 800 ? (BUBBLE_MS - age) / 800 : 1;

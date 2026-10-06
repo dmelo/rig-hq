@@ -73,7 +73,7 @@ export function startDemo({ state, history, broadcast, HISTORY }) {
     const down = Math.random() < 0.55;
     const ev = {
       kind: "talk",
-      verb: down ? "asks" : "hands back",
+      verb: Math.random() < 0.3 ? "says" : down ? "asks" : "hands back",
       from: down ? orch.session : other.session,
       to: down ? other.session : orch.session,
       summary: down ? pick(ASKS) : pick(BACKS),

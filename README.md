@@ -10,7 +10,7 @@ A pixel-art office for your [OpenRig](https://openrig.dev) agent teams. Every ri
 - **In the coffee room:** idle, mug in hand. A seat heads there 15 seconds after going idle, so quick hand-offs don't send people back and forth.
 - **Queued at your door:** they need you (a permission or selection prompt, or OpenRig flagged the seat for attention). They line up in the order they started waiting, with a red "!", and the side panel lists each one with its `tmux attach` command. Answer the prompt and they walk back.
 
-**Conversations:** when a seat creates or hands off a queue item, an envelope flies from sender to recipient and the sender says what it's about. The side panel keeps the last few hours; click one to replay it.
+**Conversations:** when a seat creates or hands off a queue item, an envelope flies from sender to recipient; a direct `rig send` message flies as a blue note. Either way the sender says what it's about. The side panel keeps the last few hours; click one to replay it.
 
 Hover anyone for their runtime, pod, state and work counts. Claude seats wear their pod's colour; Codex seats wear orange with a visor.
 
@@ -44,15 +44,16 @@ If the rigs run on another machine, tunnel the port: `ssh -N -L 7480:127.0.0.1:7
 `server.mjs` is a small read-only bridge; it never writes to the daemon.
 
 - Every 4 seconds it reads the rigs (`/api/ps`) and each rig's seats (`/api/rigs/:id/nodes`). A seat's state is the daemon's reconciled activity (`activityState.display`, what `rig ps` and the OpenRig TUI show), plus the daemon's on-screen prompt detection, which also catches seats waiting at a prompt.
-- It follows the daemon's event stream (`/api/events`) for queue traffic (`queue.created`, `queue.handed_off`). Activity events only trigger an early re-read, never a state change by themselves.
+- It follows the daemon's event stream (`/api/events`) for queue traffic (`queue.created`, `queue.handed_off`). Activity events only trigger an early re-read, never a state change by themselves. The first connection replays the daemon's retained history; reconnects resume with `Last-Event-ID`.
+- Every 5 seconds it reads each seat's outbox (`/api/queue/outbox/list?senderSession=…`) for `rig send` messages. Sends without a sender session aren't recorded there, so they don't show.
 - It serves `public/` and pushes state and conversations to every open page over server-sent events (`/api/stream`).
 
 The page is plain JavaScript on a `<canvas>`. All the art is drawn in code, so there are no image assets.
 
 ## Limits
 
-- Only queue traffic shows as conversation. Plain `rig send` messages aren't recorded by the daemon, so they can't be shown.
-- Tested against OpenRig 0.6.x. The daemon's HTTP API isn't documented as stable, so a future version may need changes here.
+- **Tested with OpenRig 0.6.5.** The daemon's HTTP API isn't frozen across releases. Rig HQ ignores fields it doesn't know and shows an unknown state as idle, but a future version may still need changes here.
+- Direct messages show up a few seconds late, because the outbox is polled rather than streamed.
 
 ## Inspiration
 
