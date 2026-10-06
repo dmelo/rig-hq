@@ -547,8 +547,10 @@ function personAt(e) {
   if (hit) return hit;
   for (const c of chars.values()) {
     const g = c.g; if (!g) continue;
-    const top = g.row === 0 ? g.y - 22 : g.deskY - 6, bottom = g.row === 0 ? g.deskY + 8 : g.y + 5;
-    if (Math.abs(ux - g.cx) <= DW / 2 - 1 && uy >= top && uy <= bottom) return c;
+    // Facing desks touch, and the back-row seat's monitor sits on the front desk's
+    // lower half, so the front seat ends where that monitor begins (deskY + 3).
+    const top = g.row === 0 ? g.y - 22 : g.deskY - 4, bottom = g.row === 0 ? g.deskY + 3 : g.y + 5;
+    if (Math.abs(ux - g.cx) <= DW / 2 - 1 && uy >= top && uy < bottom) return c;
   }
   return null;
 }
@@ -600,14 +602,30 @@ function openPane(seat) {
   }
   term.reset();
   paneCols = 0; pending = null;
-  paneSource = new EventSource(`api/pane?session=${encodeURIComponent(seat.session)}`);
-  paneSource.onmessage = (m) => {
+  listen(`api/pane?session=${encodeURIComponent(seat.session)}`);
+}
+
+function listen(url) {
+  const es = (paneSource = new EventSource(url));
+  es.onmessage = (m) => {
     const f = JSON.parse(m.data);
     if (f.kind === "gone") { paneNote.textContent = `screen unavailable: ${f.error}`; return; }
     if (scrolledBack()) { pending = f; return; } // drawn when you scroll back down
     drawFrame(f);
   };
-  paneSource.onerror = () => { paneNote.textContent = "view only · reconnecting…"; };
+  es.onerror = () => {
+    if (es.readyState !== EventSource.CLOSED) { paneNote.textContent = "view only · reconnecting…"; return; }
+    // The browser gave up after an error status: ask the server why, and retry
+    // unless the answer is final (screens off, unknown seat).
+    const retry = (ms) => setTimeout(() => { if (paneSource === es) listen(url); }, ms);
+    fetch(url).then(async (r) => {
+      if (paneSource !== es) { r.body?.cancel(); return; } // closed or switched meanwhile
+      if (r.status === 404) { paneNote.textContent = `view only · ${(await r.json().catch(() => ({}))).error ?? "unavailable"}`; return; }
+      r.body?.cancel();
+      paneNote.textContent = "view only · reconnecting…";
+      retry(2000);
+    }).catch(() => retry(3000));
+  };
 }
 
 function drawFrame(f) {
@@ -620,16 +638,21 @@ function drawFrame(f) {
 // Match the seat's width exactly (rewrapping would scramble a TUI's layout), so
 // pick the largest font at which all its columns fit the panel, then as many
 // rows as the panel holds.
+// xterm's own measured cell size (what its renderer uses); falls back to an
+// estimate before the first render. Line height differs by font, so guessing
+// it clips the bottom rows, where the agent's prompt is.
+const cellSize = (fontSize) => term._core?._renderService?.dimensions?.css?.cell ?? { width: fontSize * 0.6, height: fontSize * 1.3 };
 function fitPane(cols) {
   paneCols = cols;
   const box = document.getElementById("term");
-  const probe = document.createElement("canvas").getContext("2d");
-  probe.font = `100px ${term.options.fontFamily}`;
-  const perPx = probe.measureText("W".repeat(50)).width / 50 / 100; // cell width per px of font size
-  const fontSize = Math.max(6, Math.min(14, Math.floor(((box.clientWidth - 16) / cols / perPx) * 10) / 10));
-  term.options.fontSize = fontSize;
-  const cellH = Math.ceil(fontSize * 1.2);
-  term.resize(cols, Math.max(10, Math.floor((box.clientHeight - 12) / cellH)));
+  const availW = box.clientWidth - 16, availH = box.clientHeight - 12;
+  let fontSize = term.options.fontSize;
+  for (let i = 0; i < 3; i++) { // cell width scales with font size; two passes settle it
+    const next = Math.max(6, Math.min(14, Math.floor(fontSize * (availW / cols / cellSize(fontSize).width) * 10) / 10));
+    if (next === fontSize) break;
+    term.options.fontSize = fontSize = next;
+  }
+  term.resize(cols, Math.max(10, Math.floor(availH / cellSize(fontSize).height)));
 }
 
 function closePane() {

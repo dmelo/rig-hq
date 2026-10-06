@@ -37,6 +37,7 @@ node server.mjs --demo
 | `HOST` | `127.0.0.1` | bind address; the page and its event stream have no auth, so keep it on loopback unless you trust the network |
 | `DAEMON` | `http://127.0.0.1:7433` | the OpenRig daemon |
 | `RIG_HQ_BOSS` | `You` | the name on your office door (`?boss=Name` in the URL overrides it for one page) |
+| `RIG_HQ_ALLOWED_HOSTS` | | extra host names to answer to, comma-separated. Rig HQ only answers requests addressed to this machine (loopback, its hostname, its IP addresses), so a web page can't reach it through DNS rebinding; behind a reverse proxy with its own name, add that name here |
 | `RIG_HQ_SCREENS` | on | `off` hides seat screens. A screen shows whatever the agent printed, secrets included, to anyone who can open the page |
 | `DEMO` | | `1` for demo mode, same as `--demo` |
 
