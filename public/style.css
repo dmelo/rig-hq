@@ -1,0 +1,51 @@
+:root {
+  --bg: #14161c;
+  --panel: #1c1f27;
+  --ink: #e8e6df;
+  --muted: #9a9ca5;
+  --line: #2c303b;
+  --run: #5fd38d;
+  --idle: #7d808a;
+  --need: #ff5c5c;
+  --accent: #f2b84b;
+}
+:root[data-theme="light"] {
+  --bg: #efece4; --panel: #f8f6f0; --ink: #23252b; --muted: #6b6e76; --line: #d9d5ca;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #efece4; --panel: #f8f6f0; --ink: #23252b; --muted: #6b6e76; --line: #d9d5ca;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 13px/1.4 ui-monospace, "JetBrains Mono", Menlo, monospace; }
+main { display: flex; height: 100vh; }
+#floor { flex: 1; position: relative; overflow: auto; }
+canvas { display: block; image-rendering: pixelated; }
+aside { width: 340px; flex: none; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 14px 16px; }
+h1 { font-size: 16px; margin: 0; letter-spacing: .04em; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 6px; }
+h2 b { color: var(--need); }
+#status { color: var(--muted); margin: 2px 0 0; font-size: 12px; }
+#legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
+.dot.run { background: var(--run); } .dot.idle { background: var(--idle); } .dot.need { background: var(--need); }
+.env { display: inline-block; width: 11px; height: 8px; background: #f4efe2; border: 1px solid #a99; margin-right: 5px; vertical-align: -1px; }
+ul { list-style: none; margin: 0; padding: 0; }
+li { padding: 7px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+li:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+li .who { font-weight: 600; }
+li .when { color: var(--muted); font-size: 11px; float: right; }
+li .what { color: var(--muted); display: block; margin-top: 2px; overflow-wrap: anywhere; }
+#needs li .who { color: var(--need); }
+#needs:empty::after { content: "Nobody. Enjoy the quiet."; color: var(--muted); }
+#log:empty::after { content: "No queue traffic in the last few hours."; color: var(--muted); }
+#tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); padding: 8px 10px; max-width: 320px; font-size: 12px; box-shadow: 0 4px 16px #0006; z-index: 2; }
+#tip b { display: block; margin-bottom: 3px; }
+#tip code { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+#banner { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: var(--need); color: #fff; padding: 6px 12px; font-size: 12px; z-index: 3; }
+@media (max-width: 760px) {
+  main { flex-direction: column; height: auto; }
+  #floor { height: 70vh; flex: none; }
+  aside { width: auto; border-left: 0; border-top: 1px solid var(--line); }
+}

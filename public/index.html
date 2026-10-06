@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rig HQ</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%23243'/><rect x='5' y='2' width='6' height='5' fill='%23f2c79b'/><rect x='4' y='7' width='8' height='5' fill='%2368b'/></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <section id="floor">
+    <canvas id="office"></canvas>
+    <div id="tip" hidden></div>
+    <div id="banner" hidden></div>
+  </section>
+  <aside>
+    <header>
+      <h1>Rig HQ</h1>
+      <p id="status">connecting…</p>
+    </header>
+    <div id="legend">
+      <span><i class="dot run"></i>working</span>
+      <span><i class="dot idle"></i>idle</span>
+      <span><i class="dot need"></i>needs you</span>
+      <span><i class="env"></i>queue handoff</span>
+    </div>
+    <h2>Waiting for you <b id="need-count">0</b></h2>
+    <ul id="needs"></ul>
+    <h2>Conversations</h2>
+    <ul id="log"></ul>
+  </aside>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

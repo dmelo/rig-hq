@@ -1,0 +1,9 @@
+{
+  "name": "rig-hq",
+  "private": true,
+  "type": "module",
+  "description": "A pixel-art office for OpenRig agent teams: one room per rig, seats as people, your corner office and a coffee room",
+  "license": "MIT",
+  "scripts": { "start": "node server.mjs" },
+  "engines": { "node": ">=22" }
+}
