@@ -519,7 +519,9 @@ function renderPanel() {
 }
 
 document.getElementById("needs").addEventListener("click", (e) => {
-  const li = e.target.closest("li"); if (li) highlight([li.dataset.s]);
+  const li = e.target.closest("li"); if (!li) return;
+  highlight([li.dataset.s]);
+  const c = chars.get(li.dataset.s); if (c) openPane(c.seat);
 });
 document.getElementById("log").addEventListener("click", (e) => {
   const li = e.target.closest("li"); if (!li) return;
@@ -535,23 +537,132 @@ function highlight(sessions) {
   if (c) canvas.parentElement.scrollTo({ top: Math.max(0, (c.y - 60) * P), behavior: "smooth" });
 }
 
-canvas.addEventListener("mousemove", (e) => {
+// What's under the pointer: a person wherever they are, or a desk (with its
+// chair and name label), so a seat stays clickable while its person is away.
+function personAt(e) {
   const rect = canvas.getBoundingClientRect();
   const ux = (e.clientX - rect.left) / P, uy = (e.clientY - rect.top) / P;
   let hit = null;
+  for (const c of chars.values()) if (Math.abs(ux - c.x) < 7 && uy > c.y - 17 && uy < c.y + 12) hit = c;
+  if (hit) return hit;
   for (const c of chars.values()) {
-    const p = c;
-    if (Math.abs(ux - p.x) < 7 && uy > p.y - 17 && uy < p.y + 12) hit = c;
+    const g = c.g; if (!g) continue;
+    // Facing desks touch, and the back-row seat's monitor sits on the front desk's
+    // lower half, so the front seat ends where that monitor begins (deskY + 3).
+    const top = g.row === 0 ? g.y - 22 : g.deskY - 4, bottom = g.row === 0 ? g.deskY + 3 : g.y + 5;
+    if (Math.abs(ux - g.cx) <= DW / 2 - 1 && uy >= top && uy < bottom) return c;
   }
+  return null;
+}
+
+canvas.addEventListener("click", (e) => { const c = personAt(e); if (c) openPane(c.seat); });
+
+canvas.addEventListener("mousemove", (e) => {
+  const hit = personAt(e);
+  canvas.style.cursor = hit ? "pointer" : "default";
   if (!hit) { tip.hidden = true; return; }
   const s = hit.seat;
-  tip.innerHTML = `<b>${esc(s.session)}</b>${esc(s.runtime)} · pod ${esc(s.pod)}<br>state: ${esc(s.state)}${s.reason ? ` (${esc(s.reason)})` : ""}<br>work: ${s.inProgress} in progress, ${s.pending} pending${s.lastActivityAt ? `<br>last event ${ago(Date.parse(s.lastActivityAt))} ago` : ""}${s.attach ? `<br><code>${esc(s.attach)}</code>` : ""}`;
+  tip.innerHTML = `<b>${esc(s.session)}</b>${esc(s.runtime)} · pod ${esc(s.pod)}<br><i>click to watch their screen</i><br>state: ${esc(s.state)}${s.reason ? ` (${esc(s.reason)})` : ""}<br>work: ${s.inProgress} in progress, ${s.pending} pending${s.lastActivityAt ? `<br>last event ${ago(Date.parse(s.lastActivityAt))} ago` : ""}${s.attach ? `<br><code>${esc(s.attach)}</code>` : ""}`;
   tip.hidden = false;
   const fr = canvas.parentElement.getBoundingClientRect();
   tip.style.left = `${Math.min(e.clientX - fr.left + canvas.parentElement.scrollLeft + 14, canvas.parentElement.scrollLeft + fr.width - 330)}px`;
   tip.style.top = `${e.clientY - fr.top + canvas.parentElement.scrollTop + 14}px`;
 });
 canvas.addEventListener("mouseleave", () => (tip.hidden = true));
+
+// ------------------------------------------------------------- seat screen
+
+// View-only terminal for one seat: the server streams its tmux pane (with
+// colours) whenever it changes. Scroll up to read back and updates pause;
+// scroll to the bottom and they resume.
+const pane = document.getElementById("pane");
+const paneTitle = document.getElementById("pane-title");
+const paneNote = document.getElementById("pane-note");
+let term = null, paneSource = null, paneCols = 0, pending = null, lastNote = "";
+const scrolledBack = () => { const b = term.buffer.active; return b.viewportY < b.baseY; };
+
+function openPane(seat) {
+  closePane();
+  paneTitle.textContent = `${seat.session} · ${seat.state}`;
+  pane.hidden = false;
+  tip.hidden = true;
+  if (world.demo) { paneNote.textContent = "demo mode has no real screens"; return; }
+  if (world.screens === false) { paneNote.textContent = "seat screens are turned off (RIG_HQ_SCREENS=off)"; return; }
+  if (typeof Terminal === "undefined") { paneNote.textContent = "terminal library failed to load (needs cdn.jsdelivr.net)"; return; }
+  paneNote.textContent = "view only · connecting…";
+  if (!term) {
+    term = new Terminal({ disableStdin: true, cursorBlink: false, scrollback: 2000, fontSize: 12,
+      fontFamily: 'ui-monospace, "JetBrains Mono", Menlo, monospace', theme: { background: "#101217" } });
+    term.open(document.getElementById("term"));
+    term.onScroll(() => {
+      if (scrolledBack()) paneNote.textContent = "view only · paused while you scroll back";
+      else if (pending) { const f = pending; pending = null; drawFrame(f); }
+      else paneNote.textContent = lastNote;
+    });
+  }
+  term.reset();
+  paneCols = 0; pending = null;
+  listen(`api/pane?session=${encodeURIComponent(seat.session)}`);
+}
+
+function listen(url) {
+  const es = (paneSource = new EventSource(url));
+  es.onmessage = (m) => {
+    const f = JSON.parse(m.data);
+    if (f.kind === "gone") { paneNote.textContent = `screen unavailable: ${f.error}`; return; }
+    if (scrolledBack()) { pending = f; return; } // drawn when you scroll back down
+    drawFrame(f);
+  };
+  es.onerror = () => {
+    if (es.readyState !== EventSource.CLOSED) { paneNote.textContent = "view only · reconnecting…"; return; }
+    // The browser gave up after an error status: ask the server why, and retry
+    // unless the answer is final (screens off, unknown seat).
+    const retry = (ms) => setTimeout(() => { if (paneSource === es) listen(url); }, ms);
+    fetch(url).then(async (r) => {
+      if (paneSource !== es) { r.body?.cancel(); return; } // closed or switched meanwhile
+      if (r.status === 404) { paneNote.textContent = `view only · ${(await r.json().catch(() => ({}))).error ?? "unavailable"}`; return; }
+      r.body?.cancel();
+      paneNote.textContent = "view only · reconnecting…";
+      retry(2000);
+    }).catch(() => retry(3000));
+  };
+}
+
+function drawFrame(f) {
+    if (f.cols !== paneCols) fitPane(f.cols);
+    term.reset();
+    term.write(f.screen.replace(/\n$/, "").replace(/\n/g, "\r\n"), () => term.scrollToBottom());
+    paneNote.textContent = lastNote = `view only · ${f.cols}×${f.rows} · live`;
+}
+
+// Match the seat's width exactly (rewrapping would scramble a TUI's layout), so
+// pick the largest font at which all its columns fit the panel, then as many
+// rows as the panel holds.
+// xterm's own measured cell size (what its renderer uses); falls back to an
+// estimate before the first render. Line height differs by font, so guessing
+// it clips the bottom rows, where the agent's prompt is.
+const cellSize = (fontSize) => term._core?._renderService?.dimensions?.css?.cell ?? { width: fontSize * 0.6, height: fontSize * 1.3 };
+function fitPane(cols) {
+  paneCols = cols;
+  const box = document.getElementById("term");
+  const availW = box.clientWidth - 16, availH = box.clientHeight - 12;
+  let fontSize = term.options.fontSize;
+  for (let i = 0; i < 3; i++) { // cell width scales with font size; two passes settle it
+    const next = Math.max(6, Math.min(14, Math.floor(fontSize * (availW / cols / cellSize(fontSize).width) * 10) / 10));
+    if (next === fontSize) break;
+    term.options.fontSize = fontSize = next;
+  }
+  term.resize(cols, Math.max(10, Math.floor(availH / cellSize(fontSize).height)));
+}
+
+function closePane() {
+  if (paneSource) { paneSource.close(); paneSource = null; }
+  pane.hidden = true;
+}
+
+document.getElementById("pane-close").addEventListener("click", closePane);
+window.addEventListener("resize", () => { if (!pane.hidden && term && paneCols) fitPane(paneCols); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !pane.hidden) closePane(); });
 
 // ------------------------------------------------------------------ data
 

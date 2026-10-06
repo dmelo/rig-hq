@@ -9,9 +9,13 @@
 //   HOST         (default 127.0.0.1)               bind address
 //   DAEMON       (default http://127.0.0.1:7433)   the OpenRig daemon
 //   RIG_HQ_BOSS  (default "You")                   the name on the boss's door
+//   RIG_HQ_SCREENS (default on)                    "off" hides seat screens (they show whatever the agent printed)
+//   RIG_HQ_ALLOWED_HOSTS                           extra Host names to accept, comma-separated (e.g. a reverse-proxy name)
 //   DEMO=1 or --demo                               invented rigs, no daemon needed
 
 import http from "node:http";
+import { execFile } from "node:child_process";
+import { hostname, networkInterfaces } from "node:os";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,11 +26,12 @@ const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:7433";
 const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
 const BOSS = process.env.RIG_HQ_BOSS || "You";
 const DEMO = process.env.DEMO === "1" || process.argv.includes("--demo");
+const SCREENS = process.env.RIG_HQ_SCREENS !== "off";
 const POLL_MS = 4000;
 const HISTORY = 60; // conversations kept for pages that open later
 const HISTORY_WINDOW_MS = 6 * 3600 * 1000; // replayed conversations younger than this are kept
 
-const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO };
+const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO, screens: SCREENS && !DEMO };
 const history = []; // recent conversation events, oldest first
 const seenOutbox = new Set(); // outboxIds already turned into conversations
 let lastEventId = null; // last SSE id from the daemon, sent back as Last-Event-ID on reconnect
@@ -59,6 +64,9 @@ function seatState(node) {
   return { state, reason };
 }
 
+let markReady;
+const ready = new Promise((r) => (markReady = r)); // settles after the first poll, success or not
+
 async function poll() {
   try {
     const ps = await getJson("/api/ps");
@@ -88,8 +96,10 @@ async function poll() {
       });
     }
     Object.assign(state, { rigs, updatedAt: new Date().toISOString(), daemonOk: true, error: null });
+    markReady();
   } catch (e) {
     Object.assign(state, { daemonOk: false, error: String(e.message ?? e) });
+    markReady();
   }
   broadcast({ kind: "state", state });
 }
@@ -200,6 +210,68 @@ async function follow() {
   }
 }
 
+// ------------------------------------------------------------- seat screen
+
+// View-only: a seat's screen, read from its tmux pane with colours and sent to
+// the page when it changes. Read-only by construction (capture-pane never
+// types), and only for seats the daemon lists, so a request can't name an
+// arbitrary tmux session. Needs Rig HQ on the same host as the rigs.
+const PANE_MS = 500, PANE_GONE_MS = 3000, PANE_LINES = 400;
+const knownSession = (name) => state.rigs.some((r) => r.seats.some((x) => x.session === name));
+const tmux = (args) => new Promise((resolve, reject) =>
+  execFile("tmux", args, { maxBuffer: 8 * 1024 * 1024, timeout: 5000 }, (err, out) => (err ? reject(err) : resolve(out))));
+
+function streamPane(req, res, session) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const target = `=${session}:`; // exact session name; its current window's active pane
+  const send = (frame) => { if (frame !== last) { last = frame; res.write(`data: ${frame}\n\n`); } };
+  let last = "", busy = false, closed = false, timer = null;
+  const tick = async () => {
+    if (busy || closed) return;
+    busy = true;
+    let gone = false;
+    if (!knownSession(session)) { // the daemon stopped listing it: stop reading it
+      send(JSON.stringify({ kind: "gone", error: "the daemon no longer lists this seat" }));
+      res.end();
+      closed = true;
+      busy = false;
+      return;
+    }
+    try {
+      const [size, screen] = await Promise.all([
+        tmux(["display-message", "-p", "-t", target, "#{pane_width} #{pane_height}"]),
+        tmux(["capture-pane", "-p", "-e", "-t", target, "-S", `-${PANE_LINES}`]),
+      ]);
+      const [cols, rows] = size.trim().split(" ").map(Number);
+      send(JSON.stringify({ kind: "screen", cols, rows, screen }));
+    } catch (e) {
+      gone = true; // sent once (send() skips repeats); a returning pane differs from it, so it is redrawn
+      send(JSON.stringify({ kind: "gone", error: String(e.message ?? e).split("\n")[0] }));
+    }
+    busy = false;
+    if (!closed) timer = setTimeout(tick, gone ? PANE_GONE_MS : PANE_MS); // back off while the pane is missing
+  };
+  tick();
+  req.on("close", () => { closed = true; clearTimeout(timer); });
+}
+
+// ---------------------------------------------------------------- host check
+
+// Only answer requests addressed to this machine by a name it actually has, so
+// a web page on another domain can't reach the API through DNS rebinding (it
+// would arrive with its own Host). Allowed: loopback, the OS hostname, every
+// local interface address, and RIG_HQ_ALLOWED_HOSTS (for a reverse proxy name).
+const allowedHosts = new Set([
+  "localhost", "127.0.0.1", "::1", hostname().toLowerCase(), hostname().split(".")[0].toLowerCase(),
+  ...Object.values(networkInterfaces()).flat().map((i) => i.address.toLowerCase()),
+  ...(process.env.RIG_HQ_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean),
+]);
+function hostAllowed(req) {
+  const h = String(req.headers.host ?? "").toLowerCase();
+  const name = h.startsWith("[") ? h.slice(1, h.indexOf("]")) : h.replace(/:\d+$/, "");
+  return allowedHosts.has(name);
+}
+
 // ------------------------------------------------------------------ browser
 
 function broadcast(msg) {
@@ -211,11 +283,27 @@ const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; ch
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://x");
+  if (!hostAllowed(req)) {
+    res.writeHead(421, { "content-type": "text/plain" });
+    res.end(`rig-hq does not answer to Host "${req.headers.host ?? ""}"; add it to RIG_HQ_ALLOWED_HOSTS if it is yours\n`);
+    return;
+  }
   if (url.pathname === "/api/stream") {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
     res.write(`data: ${JSON.stringify({ kind: "hello", state, history })}\n\n`);
     clients.add(res);
     req.on("close", () => clients.delete(res));
+    return;
+  }
+  if (url.pathname === "/api/pane") {
+    const session = url.searchParams.get("session") ?? "";
+    await ready; // a freshly started server knows no seats until its first poll
+    if (!state.screens || !knownSession(session)) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: !state.screens ? "seat screens are off" : "unknown seat" }));
+      return;
+    }
+    streamPane(req, res, session);
     return;
   }
   if (url.pathname === "/api/state") {
@@ -238,6 +326,7 @@ server.listen(PORT, HOST, () => console.log(`rig-hq on http://${HOST}:${PORT} ($
 if (DEMO) {
   const { startDemo } = await import("./demo.mjs");
   startDemo({ state, history, broadcast, HISTORY });
+  markReady();
 } else {
   poll().then(pollOutboxes);
   setInterval(poll, POLL_MS);
