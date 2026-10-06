@@ -537,12 +537,20 @@ function highlight(sessions) {
   if (c) canvas.parentElement.scrollTo({ top: Math.max(0, (c.y - 60) * P), behavior: "smooth" });
 }
 
+// What's under the pointer: a person wherever they are, or a desk (with its
+// chair and name label), so a seat stays clickable while its person is away.
 function personAt(e) {
   const rect = canvas.getBoundingClientRect();
   const ux = (e.clientX - rect.left) / P, uy = (e.clientY - rect.top) / P;
   let hit = null;
   for (const c of chars.values()) if (Math.abs(ux - c.x) < 7 && uy > c.y - 17 && uy < c.y + 12) hit = c;
-  return hit;
+  if (hit) return hit;
+  for (const c of chars.values()) {
+    const g = c.g; if (!g) continue;
+    const top = g.row === 0 ? g.y - 22 : g.deskY - 6, bottom = g.row === 0 ? g.deskY + 8 : g.y + 5;
+    if (Math.abs(ux - g.cx) <= DW / 2 - 1 && uy >= top && uy <= bottom) return c;
+  }
+  return null;
 }
 
 canvas.addEventListener("click", (e) => { const c = personAt(e); if (c) openPane(c.seat); });
@@ -603,15 +611,25 @@ function openPane(seat) {
 }
 
 function drawFrame(f) {
-    if (f.cols !== paneCols) { // match the seat's width; fit as many rows as the panel holds
-      paneCols = f.cols;
-      const box = document.getElementById("term");
-      const cellH = Math.ceil(term.options.fontSize * 1.2);
-      term.resize(f.cols, Math.max(10, Math.floor((box.clientHeight - 12) / cellH)));
-    }
+    if (f.cols !== paneCols) fitPane(f.cols);
     term.reset();
     term.write(f.screen.replace(/\n$/, "").replace(/\n/g, "\r\n"), () => term.scrollToBottom());
     paneNote.textContent = lastNote = `view only · ${f.cols}×${f.rows} · live`;
+}
+
+// Match the seat's width exactly (rewrapping would scramble a TUI's layout), so
+// pick the largest font at which all its columns fit the panel, then as many
+// rows as the panel holds.
+function fitPane(cols) {
+  paneCols = cols;
+  const box = document.getElementById("term");
+  const probe = document.createElement("canvas").getContext("2d");
+  probe.font = `100px ${term.options.fontFamily}`;
+  const perPx = probe.measureText("W".repeat(50)).width / 50 / 100; // cell width per px of font size
+  const fontSize = Math.max(6, Math.min(14, Math.floor(((box.clientWidth - 16) / cols / perPx) * 10) / 10));
+  term.options.fontSize = fontSize;
+  const cellH = Math.ceil(fontSize * 1.2);
+  term.resize(cols, Math.max(10, Math.floor((box.clientHeight - 12) / cellH)));
 }
 
 function closePane() {
@@ -620,6 +638,7 @@ function closePane() {
 }
 
 document.getElementById("pane-close").addEventListener("click", closePane);
+window.addEventListener("resize", () => { if (!pane.hidden && term && paneCols) fitPane(paneCols); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !pane.hidden) closePane(); });
 
 // ------------------------------------------------------------------ data

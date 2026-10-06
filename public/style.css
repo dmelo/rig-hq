@@ -50,7 +50,7 @@ li .what { color: var(--muted); display: block; margin-top: 2px; overflow-wrap: 
   #floor { height: 70vh; flex: none; }
   aside { width: auto; border-left: 0; border-top: 1px solid var(--line); }
 }
-#pane { position: fixed; z-index: 5; left: 50%; top: 6vh; transform: translateX(-50%); width: min(980px, 94vw); height: 84vh; display: flex; flex-direction: column; background: #101217; border: 1px solid #3a3f4b; box-shadow: 0 10px 40px #000a; }
+#pane { position: fixed; z-index: 5; left: 50%; top: 6vh; transform: translateX(-50%); width: min(1500px, 96vw); height: 86vh; display: flex; flex-direction: column; background: #101217; border: 1px solid #3a3f4b; box-shadow: 0 10px 40px #000a; }
 #pane[hidden] { display: none; }
 #pane header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: #1c1f27; color: #e8e6df; border-bottom: 1px solid #2c303b; }
 #pane header b { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
