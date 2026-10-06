@@ -9,9 +9,11 @@
 //   HOST         (default 127.0.0.1)               bind address
 //   DAEMON       (default http://127.0.0.1:7433)   the OpenRig daemon
 //   RIG_HQ_BOSS  (default "You")                   the name on the boss's door
+//   RIG_HQ_SCREENS (default on)                    "off" hides seat screens (they show whatever the agent printed)
 //   DEMO=1 or --demo                               invented rigs, no daemon needed
 
 import http from "node:http";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,11 +24,12 @@ const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:7433";
 const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
 const BOSS = process.env.RIG_HQ_BOSS || "You";
 const DEMO = process.env.DEMO === "1" || process.argv.includes("--demo");
+const SCREENS = process.env.RIG_HQ_SCREENS !== "off";
 const POLL_MS = 4000;
 const HISTORY = 60; // conversations kept for pages that open later
 const HISTORY_WINDOW_MS = 6 * 3600 * 1000; // replayed conversations younger than this are kept
 
-const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO };
+const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO, screens: SCREENS && !DEMO };
 const history = []; // recent conversation events, oldest first
 const seenOutbox = new Set(); // outboxIds already turned into conversations
 let lastEventId = null; // last SSE id from the daemon, sent back as Last-Event-ID on reconnect
@@ -200,6 +203,42 @@ async function follow() {
   }
 }
 
+// ------------------------------------------------------------- seat screen
+
+// View-only: a seat's screen, read from its tmux pane with colours and sent to
+// the page when it changes. Read-only by construction (capture-pane never
+// types), and only for seats the daemon lists, so a request can't name an
+// arbitrary tmux session. Needs Rig HQ on the same host as the rigs.
+const PANE_MS = 500, PANE_LINES = 400;
+const knownSession = (name) => state.rigs.some((r) => r.seats.some((x) => x.session === name));
+const tmux = (args) => new Promise((resolve, reject) =>
+  execFile("tmux", args, { maxBuffer: 8 * 1024 * 1024, timeout: 5000 }, (err, out) => (err ? reject(err) : resolve(out))));
+
+function streamPane(req, res, session) {
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const target = `=${session}:`; // exact session name; its current window's active pane
+  let last = "", busy = false, closed = false;
+  const tick = async () => {
+    if (busy || closed) return;
+    busy = true;
+    try {
+      const [size, screen] = await Promise.all([
+        tmux(["display-message", "-p", "-t", target, "#{pane_width} #{pane_height}"]),
+        tmux(["capture-pane", "-p", "-e", "-t", target, "-S", `-${PANE_LINES}`]),
+      ]);
+      const [cols, rows] = size.trim().split(" ").map(Number);
+      const frame = JSON.stringify({ kind: "screen", cols, rows, screen });
+      if (frame !== last) { last = frame; res.write(`data: ${frame}\n\n`); }
+    } catch (e) {
+      res.write(`data: ${JSON.stringify({ kind: "gone", error: String(e.message ?? e).split("\n")[0] })}\n\n`);
+    }
+    busy = false;
+  };
+  tick();
+  const timer = setInterval(tick, PANE_MS);
+  req.on("close", () => { closed = true; clearInterval(timer); });
+}
+
 // ------------------------------------------------------------------ browser
 
 function broadcast(msg) {
@@ -216,6 +255,16 @@ const server = http.createServer(async (req, res) => {
     res.write(`data: ${JSON.stringify({ kind: "hello", state, history })}\n\n`);
     clients.add(res);
     req.on("close", () => clients.delete(res));
+    return;
+  }
+  if (url.pathname === "/api/pane") {
+    const session = url.searchParams.get("session") ?? "";
+    if (!state.screens || !knownSession(session)) {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: !state.screens ? "seat screens are off" : "unknown seat" }));
+      return;
+    }
+    streamPane(req, res, session);
     return;
   }
   if (url.pathname === "/api/state") {

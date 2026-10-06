@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rig HQ</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='%23243'/><rect x='5' y='2' width='6' height='5' fill='%23f2c79b'/><rect x='4' y='7' width='8' height='5' fill='%2368b'/></svg>">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -13,6 +14,10 @@
     <canvas id="office"></canvas>
     <div id="tip" hidden></div>
     <div id="banner" hidden></div>
+    <div id="pane" hidden>
+      <header><b id="pane-title"></b><span id="pane-note">view only</span><button id="pane-close" title="Close (Esc)">×</button></header>
+      <div id="term"></div>
+    </div>
   </section>
   <aside>
     <header>
@@ -32,6 +37,7 @@
     <ul id="log"></ul>
   </aside>
 </main>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

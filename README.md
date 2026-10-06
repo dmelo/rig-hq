@@ -14,6 +14,8 @@ A pixel-art office for your [OpenRig](https://openrig.dev) agent teams. Every ri
 
 Hover anyone for their runtime, pod, state and work counts. Claude seats wear their pod's colour; Codex seats wear orange with a visor.
 
+**Watch a seat's screen:** click anyone (or a name in the waiting list) to open their terminal, live and in colour. It's view only: Rig HQ reads the seat's tmux pane and never types into it. Scroll up to read back and updates pause until you scroll down again; Esc closes it. This needs Rig HQ on the same machine as the rigs.
+
 ## Run it
 
 Needs Node 22 or later and a running OpenRig daemon. No dependencies to install.
@@ -35,6 +37,7 @@ node server.mjs --demo
 | `HOST` | `127.0.0.1` | bind address; the page and its event stream have no auth, so keep it on loopback unless you trust the network |
 | `DAEMON` | `http://127.0.0.1:7433` | the OpenRig daemon |
 | `RIG_HQ_BOSS` | `You` | the name on your office door (`?boss=Name` in the URL overrides it for one page) |
+| `RIG_HQ_SCREENS` | on | `off` hides seat screens. A screen shows whatever the agent printed, secrets included, to anyone who can open the page |
 | `DEMO` | | `1` for demo mode, same as `--demo` |
 
 If the rigs run on another machine, tunnel the port: `ssh -N -L 7480:127.0.0.1:7480 <host>`, then open `http://localhost:7480`.
@@ -47,8 +50,9 @@ If the rigs run on another machine, tunnel the port: `ssh -N -L 7480:127.0.0.1:7
 - It follows the daemon's event stream (`/api/events`) for queue traffic (`queue.created`, `queue.handed_off`). Activity events only trigger an early re-read, never a state change by themselves. The first connection replays the daemon's retained history; reconnects resume with `Last-Event-ID`.
 - Every 5 seconds it reads each seat's outbox (`/api/queue/outbox/list?senderSession=…`) for `rig send` messages. Sends without a sender session aren't recorded there, so they don't show.
 - It serves `public/` and pushes state and conversations to every open page over server-sent events (`/api/stream`).
+- A seat's screen comes from `tmux capture-pane`, read twice a second and sent only when it changes (`/api/pane`). Only seats the daemon lists can be opened, and tmux is called without a shell.
 
-The page is plain JavaScript on a `<canvas>`. All the art is drawn in code, so there are no image assets.
+The page is plain JavaScript on a `<canvas>`. All the art is drawn in code, so there are no image assets. The screen panel uses [xterm.js](https://xtermjs.org), loaded from jsDelivr.
 
 ## Limits
 
