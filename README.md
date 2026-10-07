@@ -8,9 +8,11 @@ A pixel-art office for your [OpenRig](https://openrig.dev) agent teams. Every ri
 
 - **At their desk:** working. They type, their screen scrolls green, and a "…" bubble floats over them.
 - **In the coffee room:** idle, mug in hand. A seat heads there 15 seconds after going idle, so quick hand-offs don't send people back and forth.
-- **Queued at your door:** they need you (a permission or selection prompt, or OpenRig flagged the seat for attention). They line up in the order they started waiting, with a red "!", and the side panel lists each one with its `tmux attach` command. Answer the prompt and they walk back.
+- **Queued at your door:** they need you: a permission or selection prompt, or the seat is held, errored or flagged for attention. This follows the same rule as `rig ps`'s attention count. They line up in the order they started waiting, with a red "!", and the side panel lists each one with its `tmux attach` command. Answer the prompt and they walk back.
 
-**Conversations:** when a seat creates or hands off a queue item, an envelope flies from sender to recipient; a direct `rig send` message flies as a blue note. Either way the sender says what it's about. The side panel keeps the last few hours; click one to replay it.
+**Conversations:** when a seat creates or hands off a queue item, an envelope flies from sender to recipient; a direct `rig send` message flies as a blue note. Either way the sender says what it's about. When one seat answers another seat's prompt, a yellow card flies and the seat walks over to that desk for a while. The side panel keeps the last few hours; click one to replay it.
+
+**Moments:** "got it" pops over a seat when it claims a queue item, and "✓ done" when it closes one. (An item closed by handing it on shows as the hand-off envelope instead.)
 
 Hover anyone for their runtime, pod, state and work counts. Claude seats wear their pod's colour; Codex seats wear orange with a visor.
 
@@ -47,8 +49,8 @@ If the rigs run on another machine, tunnel the port: `ssh -N -L 7480:127.0.0.1:7
 
 `server.mjs` is a small read-only bridge; it never writes to the daemon.
 
-- Every 4 seconds it reads the rigs (`/api/ps`) and each rig's seats (`/api/rigs/:id/nodes`). A seat's state is the daemon's reconciled activity (`activityState.display`, what `rig ps` and the OpenRig TUI show), plus the daemon's on-screen prompt detection, which also catches seats waiting at a prompt.
-- It follows the daemon's event stream (`/api/events`) for queue traffic (`queue.created`, `queue.handed_off`). Activity events only trigger an early re-read, never a state change by themselves. The first connection replays the daemon's retained history; reconnects resume with `Last-Event-ID`.
+- Every 4 seconds it reads the rigs (`/api/ps`) and each rig's seats (`/api/rigs/:id/nodes`). Working or idle is the daemon's reconciled activity (`activityState.display`, what `rig ps` and the OpenRig TUI show). "Needs you" mirrors the daemon's attention rule: a pending-input count, or the raw hook state for runtimes whose "nothing pending" isn't trusted yet (Codex, in 0.6.5), or a held, errored or flagged seat. The seat list doesn't say which runtimes are trusted, so Rig HQ assumes only Claude Code is.
+- It follows the daemon's event stream (`/api/events`) for queue traffic (`queue.created`, `queue.handed_off`, `queue.claimed`, and `queue.updated` to done) and for one seat answering another's prompt (`transport.prompt_override`). Activity events (`agent.activity`, `seat.activity_changed`) only trigger an early re-read, never a state change by themselves. The first connection replays the daemon's retained history; reconnects resume with `Last-Event-ID`.
 - Every 5 seconds it reads each seat's outbox (`/api/queue/outbox/list?senderSession=…`) for `rig send` messages. Sends without a sender session aren't recorded there, so they don't show.
 - It serves `public/` and pushes state and conversations to every open page over server-sent events (`/api/stream`).
 - A seat's screen comes from `tmux capture-pane`, read twice a second and sent only when it changes (`/api/pane`). Only seats the daemon lists can be opened, and tmux is called without a shell.

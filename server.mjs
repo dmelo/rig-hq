@@ -45,29 +45,61 @@ async function getJson(path) {
   return res.json();
 }
 
-// The daemon's reconciled activity (activityState.display: working | idle |
-// needs-input | unknown) is what `rig ps` and the TUI render, so it is the
-// source of truth here. Raw hook events are not: a prompt interrupted with Esc
-// sends no closing hook, and a state built from them stays "needs input" forever.
-// One addition: the daemon's on-screen prompt detection (agentActivity with
-// evidenceSource "pane_heuristic", re-sampled every poll) also counts as needs-input.
+// Working vs idle comes from the daemon's reconciled activity
+// (activityState.display), what `rig ps` and the TUI render.
+//
+// "Needs you" mirrors the daemon's own attention rule (seatNeedsAttention in
+// OpenRig 0.6.5's ps-projection), so the line at the boss's door matches
+// `rig ps`'s attention count:
+//   - a positive needsInput count from the reconciled state;
+//   - otherwise, the raw hook state (agentActivity), unless the seat's runtime
+//     has a trusted needs-input source that already says "no". Claude seats do
+//     (so an Esc-interrupted prompt doesn't stick); Codex seats don't yet (their
+//     hooks are on trial), and the daemon then counts a live PermissionRequest.
+//     The seat list doesn't expose that trust, so it's mirrored by runtime;
+//   - or the seat is held, errored, failed to start or flagged for attention.
 const DISPLAY = { working: "running", idle: "idle", "needs-input": "needs_input", unknown: "idle" };
+const TRUSTED_NEEDS_INPUT = new Set(["claude-code"]);
 function seatState(node) {
   const as = node.activityState ?? {};
   const raw = node.agentActivity ?? {};
   let state = DISPLAY[as.display] ?? "idle";
   let reason = as.needsInput?.reason ?? null;
-  if (state !== "needs_input" && raw.state === "needs_input" && raw.evidenceSource === "pane_heuristic" && !raw.stale) {
-    state = "needs_input"; reason = raw.reason ?? "prompt on screen";
-  }
-  if (node.startupStatus === "attention_required") { state = "needs_input"; reason = reason ?? "attention_required"; }
+  const count = as.needsInput?.count ?? 0;
+  const rawNeeds = raw.state === "needs_input" && !raw.stale;
+  if (count > 0) state = "needs_input";
+  // With no reconciled state at all (a seat outside the daemon's tracking), the
+  // daemon has no trusted "no" either, and falls back to the raw hook for every runtime.
+  const trustedNo = node.activityState != null && TRUSTED_NEEDS_INPUT.has(node.runtime);
+  if (count === 0 && rawNeeds && !trustedNo) { state = "needs_input"; reason = raw.reason ?? "prompt"; }
+  const flag = node.lifecycleState === "attention_required" || node.startupStatus === "attention_required" ? "attention required"
+    : node.startupStatus === "failed" ? "startup failed"
+    : node.heldReason ? `held: ${node.heldReason}`
+    : node.latestError ? `error: ${String(node.latestError).slice(0, 80)}`
+    : null;
+  if (flag) { state = "needs_input"; reason = reason ?? flag; }
   return { state, reason };
 }
 
 let markReady;
 const ready = new Promise((r) => (markReady = r)); // settles after the first poll, success or not
 
+// One poll at a time: nudges can arrive faster than a poll completes, and an
+// older poll finishing last would overwrite fresher state. A poll asked for
+// while one runs is done once, right after it.
+let polling = false, pollAgain = false;
 async function poll() {
+  if (polling) { pollAgain = true; return; }
+  polling = true;
+  try {
+    await pollOnce();
+  } finally {
+    polling = false;
+    if (pollAgain) { pollAgain = false; poll(); }
+  }
+}
+
+async function pollOnce() {
   try {
     const ps = await getJson("/api/ps");
     const rigs = [];
@@ -160,9 +192,17 @@ function normalise(ev) {
       return { kind: "talk", verb: "asks", from: ev.sourceSession, to: ev.destinationSession, summary: ev.summary, qitem: ev.qitemId, at };
     case "queue.handed_off":
       return { kind: "talk", verb: "hands back", from: ev.fromSession, to: ev.toSession, summary: ev.summary, qitem: ev.qitemId, at };
+    case "transport.prompt_override": // one seat answered another seat's prompt
+      return { kind: "talk", verb: "answers a prompt for", override: true, from: ev.actorSession, to: ev.sessionName, summary: ev.overrideReason, at };
+    case "queue.updated":
+      if (ev.toState !== "done" || ev.fromState === "done") return null;
+      return { kind: "done", session: ev.actorSession, qitem: ev.qitemId, at };
+    case "queue.claimed":
+      return { kind: "claimed", session: ev.destinationSession, summary: ev.summary, qitem: ev.qitemId, at };
     case "agent.activity":
+    case "seat.activity_changed": // covers Codex, whose state comes from sampling, not hooks
     case "seat.attention_cleared":
-      return { kind: "nudge" }; // re-poll now instead of trusting the raw event
+      return { kind: "nudge", at }; // re-poll now instead of trusting the raw event
     default:
       return null;
   }
@@ -195,6 +235,8 @@ async function follow() {
           const replay = n.at < started - 5000;
           if (n.kind === "nudge") {
             if (!replay) nudge();
+          } else if (n.kind === "done" || n.kind === "claimed") {
+            if (!replay) broadcast(n); // a moment's bubble, not history
           } else if (n.kind === "talk") {
             if (replay && n.at < Date.now() - HISTORY_WINDOW_MS) continue;
             history.push(n);

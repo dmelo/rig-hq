@@ -79,9 +79,13 @@ export function startDemo({ state, history, broadcast, HISTORY }) {
       summary: down ? pick(ASKS) : pick(BACKS),
       at: Date.now(),
     };
+    if (Math.random() < 0.1) Object.assign(ev, { verb: "answers a prompt for", override: true, summary: "decline the rm -rf approval prompt so the seat is unblocked" });
     history.push(ev);
     if (history.length > HISTORY) history.shift();
     broadcast(ev);
+    // The recipient picks the work up; now and then a seat finishes something.
+    if (ev.verb === "asks") setTimeout(() => broadcast({ kind: "claimed", session: ev.to, at: Date.now() }), 1500);
+    if (Math.random() < 0.4) broadcast({ kind: "done", session: pick(seats).session, at: Date.now() });
     setTimeout(talk, 4000 + Math.random() * 6000);
   };
   setTimeout(talk, 3000);
