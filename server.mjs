@@ -68,7 +68,10 @@ function seatState(node) {
   const count = as.needsInput?.count ?? 0;
   const rawNeeds = raw.state === "needs_input" && !raw.stale;
   if (count > 0) state = "needs_input";
-  else if (rawNeeds && !TRUSTED_NEEDS_INPUT.has(node.runtime)) { state = "needs_input"; reason = raw.reason ?? "prompt"; }
+  // With no reconciled state at all (a seat outside the daemon's tracking), the
+  // daemon has no trusted "no" either, and falls back to the raw hook for every runtime.
+  const trustedNo = node.activityState != null && TRUSTED_NEEDS_INPUT.has(node.runtime);
+  if (count === 0 && rawNeeds && !trustedNo) { state = "needs_input"; reason = raw.reason ?? "prompt"; }
   const flag = node.lifecycleState === "attention_required" || node.startupStatus === "attention_required" ? "attention required"
     : node.startupStatus === "failed" ? "startup failed"
     : node.heldReason ? `held: ${node.heldReason}`
@@ -81,7 +84,22 @@ function seatState(node) {
 let markReady;
 const ready = new Promise((r) => (markReady = r)); // settles after the first poll, success or not
 
+// One poll at a time: nudges can arrive faster than a poll completes, and an
+// older poll finishing last would overwrite fresher state. A poll asked for
+// while one runs is done once, right after it.
+let polling = false, pollAgain = false;
 async function poll() {
+  if (polling) { pollAgain = true; return; }
+  polling = true;
+  try {
+    await pollOnce();
+  } finally {
+    polling = false;
+    if (pollAgain) { pollAgain = false; poll(); }
+  }
+}
+
+async function pollOnce() {
   try {
     const ps = await getJson("/api/ps");
     const rigs = [];

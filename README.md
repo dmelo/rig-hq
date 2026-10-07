@@ -12,7 +12,7 @@ A pixel-art office for your [OpenRig](https://openrig.dev) agent teams. Every ri
 
 **Conversations:** when a seat creates or hands off a queue item, an envelope flies from sender to recipient; a direct `rig send` message flies as a blue note. Either way the sender says what it's about. When one seat answers another seat's prompt, a yellow card flies and the seat walks over to that desk for a while. The side panel keeps the last few hours; click one to replay it.
 
-**Moments:** "got it" pops over a seat when it claims a queue item, and "✓ done" when it closes one.
+**Moments:** "got it" pops over a seat when it claims a queue item, and "✓ done" when it closes one. (An item closed by handing it on shows as the hand-off envelope instead.)
 
 Hover anyone for their runtime, pod, state and work counts. Claude seats wear their pod's colour; Codex seats wear orange with a visor.
 

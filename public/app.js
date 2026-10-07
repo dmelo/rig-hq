@@ -226,7 +226,12 @@ function plan() {
     } else if (want === "queue") {
       const t = slotPos(qi.get(c));
       if (t.x !== c.at.x || t.y !== c.at.y) { c.path = [t]; c.at = t; }
+    } else if (want === "visit" && c.visitedFor !== c.visitTo) { // answered another prompt meanwhile: go there
+      const tTo = target(c, "visit"), toRoom = roomOf(c, "visit");
+      c.path = route(c, "visit", "visit", c.at, tTo, c.locRoom, toRoom);
+      c.at = tTo; c.locRoom = toRoom;
     }
+    if (c.loc === "visit") c.visitedFor = c.visitTo;
   }
 }
 
