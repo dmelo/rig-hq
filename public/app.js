@@ -26,6 +26,8 @@ const chars = new Map(); // session -> character
 const needSince = new Map(); // session -> ms when it started needing the boss
 const idleSince = new Map(); // session -> ms when it went idle (0 = already idle when the page opened)
 const talks = []; // flying envelopes and speech bubbles
+const effects = []; // short bubbles over a seat: "✓ done", "got it"
+const VISIT_MS = 15000; // how long a seat stays at another seat's desk after answering its prompt
 let rooms = [], bands = [], boss = null, coffee = null, worldW = 0, worldH = 0, flash = null;
 
 // ------------------------------------------------------------------ colours
@@ -155,6 +157,7 @@ function ensureChar(seat, room, g) {
 function wanted(c) {
   const s = c.seat;
   if (s.state === "needs_input") return "queue";
+  if (c.visitTo && c.visitUntil > Date.now() && chars.has(c.visitTo.seat.session)) return "visit";
   if (s.state === "running") return "desk";
   return Date.now() - (idleSince.get(s.session) ?? 0) > COFFEE_GRACE_MS ? "coffee" : "desk";
 }
@@ -187,19 +190,20 @@ function takeSpot(c) {
 function target(c, loc, qi) {
   if (loc === "desk") return c.g;
   if (loc === "queue") return slotPos(qi);
+  if (loc === "visit") { const g = c.visitTo.g; return { x: g.cx + 13, y: g.y, dir: "left" }; } // beside their desk
   return takeSpot(c);
 }
-function roomOf(c, loc) { return loc === "desk" ? c.room : loc === "queue" ? boss : coffee; }
-function inner(c, loc, t) {
+function roomOf(c, loc) { return loc === "desk" ? c.room : loc === "queue" ? boss : loc === "visit" ? c.visitTo.room : coffee; }
+function inner(c, loc, t, room) {
   // from the spot towards the door, staying inside the room
   if (loc === "desk") return [{ x: c.g.cx, y: c.g.aisleY }, { x: c.room.doorX, y: c.g.aisleY }];
-  return [{ x: roomOf(c, loc).doorX, y: t.y }];
+  return [{ x: room.doorX, y: t.y }];
 }
 
-function route(c, from, to, tFrom, tTo) {
-  const A = roomOf(c, from), B = roomOf(c, to);
+function route(c, from, to, tFrom, tTo, A, B) {
+  if (A === B) return [...inner(c, from, tFrom, A), ...inner(c, to, tTo, B).reverse(), tTo]; // same room: no hallway
   const hall = A.band === B.band ? [] : [{ x: SPINE / 2, y: A.out.y }, { x: SPINE / 2, y: B.out.y }];
-  return [...inner(c, from, tFrom), A.inside, A.door, A.out, ...hall, B.out, B.door, B.inside, ...inner(c, to, tTo).reverse(), tTo];
+  return [...inner(c, from, tFrom, A), A.inside, A.door, A.out, ...hall, B.out, B.door, B.inside, ...inner(c, to, tTo, B).reverse(), tTo];
 }
 
 function plan() {
@@ -209,15 +213,16 @@ function plan() {
     const want = wanted(c);
     if (!c.loc) { // first sight: put them where they belong, no parade
       const t = target(c, want, qi.get(c) ?? 0);
-      Object.assign(c, { x: t.x, y: t.y, dir: t.dir, loc: want, at: t });
+      Object.assign(c, { x: t.x, y: t.y, dir: t.dir, loc: want, at: t, locRoom: roomOf(c, want) });
       continue;
     }
     if (c.path.length) continue; // finish the current walk first
     if (want !== c.loc) {
-      const tTo = target(c, want, qi.get(c) ?? 0);
-      c.path = route(c, c.loc, want, c.at, tTo);
+      const tTo = target(c, want, qi.get(c) ?? 0), toRoom = roomOf(c, want);
+      // the room it's leaving is remembered, not recomputed: a visit target can change meanwhile
+      c.path = route(c, c.loc, want, c.at, tTo, c.locRoom ?? roomOf(c, c.loc), toRoom);
       if (c.loc === "coffee") releaseSpot(c);
-      c.loc = want; c.at = tTo;
+      c.loc = want; c.at = tTo; c.locRoom = toRoom;
     } else if (want === "queue") {
       const t = slotPos(qi.get(c));
       if (t.x !== c.at.x || t.y !== c.at.y) { c.path = [t]; c.at = t; }
@@ -456,12 +461,22 @@ function draw(now) {
   const sitters = all.filter((c) => c.loc === "coffee" && !c.walking);
   const queued = all.filter((c) => c.loc === "queue" && !c.walking);
   const walkers = all.filter((c) => c.walking);
+  const visitors = all.filter((c) => c.loc === "visit" && !c.walking);
   drawBoss(now);
   drawCoffee(now, sitters);
   for (const r of rooms) if (r.kind === "rig") drawRig(r, now, atDesk);
-  for (const c of [...queued, ...walkers].sort((a, b) => a.y - b.y)) {
+  for (const c of [...queued, ...walkers, ...visitors].sort((a, b) => a.y - b.y)) {
     drawPerson(c.x, c.y, c.dir, { ...personStyle(c), walking: c.walking });
-    if (!c.walking) { bubble(c.x, c.y - 17, "!", "#ff5c5c", "#fff"); label(c.x, c.y + 1, c.seat.seat, "#f5f1e6"); label(c.x, c.y + 4.5, c.room.rig.name, "#f2b84b"); }
+    if (c.loc === "queue" && !c.walking) { bubble(c.x, c.y - 17, "!", "#ff5c5c", "#fff"); label(c.x, c.y + 1, c.seat.seat, "#f5f1e6"); label(c.x, c.y + 4.5, c.room.rig.name, "#f2b84b"); }
+  }
+
+  // Moments: "✓ done" when a seat closes a queue item, "got it" when it claims one.
+  for (let i = effects.length - 1; i >= 0; i--) {
+    const f = effects[i], age = now - f.t0, c = chars.get(f.session);
+    if (age > f.ms || !c) { effects.splice(i, 1); continue; }
+    ctx.globalAlpha = age > f.ms - 600 ? (f.ms - age) / 600 : 1;
+    bubble(c.x, c.y - 22 - Math.min(4, age / 150), f.text, f.color);
+    ctx.globalAlpha = 1;
   }
 
   // Conversations: an envelope flies from sender to recipient, the sender says what it is.
@@ -479,7 +494,10 @@ function draw(now) {
     if (pa && pb && age < TALK_MS) {
       const k = age / TALK_MS, e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
       const x = pa.x + (pb.x - pa.x) * e, y = pa.y + (pb.y - pa.y) * e - Math.sin(Math.PI * k) * 18;
-      if (t.verb === "says") { // rig send: a blue note
+      if (t.override) { // one seat answering another's prompt: a yellow card with a tick
+        R(x - 4, y - 4, 8, 7, "#ffe27a"); R(x - 4, y - 4, 8, 1, "#c9a227");
+        R(x - 2, y, 1, 1, "#2e7d32"); R(x - 1, y + 1, 1, 1, "#2e7d32"); R(x, y, 1, 1, "#2e7d32"); R(x + 1, y - 1, 1, 1, "#2e7d32"); R(x + 2, y - 2, 1, 1, "#2e7d32");
+      } else if (t.verb === "says") { // rig send: a blue note
         R(x - 3, y - 4, 7, 7, "#d6e6ff"); R(x - 3, y - 4, 7, 1, "#8fb0e0");
         R(x - 2, y - 2, 5, 1, "#6d8fc4"); R(x - 2, y, 4, 1, "#6d8fc4");
       } else { // queue handoff: an envelope
@@ -697,8 +715,14 @@ function connect() {
     else if (ev.kind === "talk") {
       history.push(ev); if (history.length > 60) history.shift();
       talks.push({ ...ev, t0: performance.now() });
+      if (ev.override) { // the actor walks over to the desk whose prompt it answered
+        const actor = chars.get(ev.from), them = chars.get(ev.to);
+        if (actor && them && actor !== them) Object.assign(actor, { visitTo: them, visitUntil: Date.now() + VISIT_MS });
+      }
       renderPanel();
     }
+    else if (ev.kind === "done") effects.push({ session: ev.session, text: "✓ done", color: "#c9f2d4", t0: performance.now(), ms: 4000 });
+    else if (ev.kind === "claimed") effects.push({ session: ev.session, text: "got it", color: "#d6e6ff", t0: performance.now(), ms: 3000 });
   };
   es.onerror = () => { world.daemonOk = false; world.error = "lost connection to the rig-hq server"; renderPanel(); };
 }
