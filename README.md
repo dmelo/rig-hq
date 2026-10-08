@@ -2,7 +2,7 @@
 
 A pixel-art office for your AI coding agents. Rig HQ shows the [OpenRig](https://openrig.dev) teams running Claude Code and Codex as people at work: every rig is a room off a hallway, every seat is a little person at a desk, and you have the corner office. See at a glance who's working, who's idle and who's waiting on you, and watch any agent's terminal live.
 
-![Rig HQ in demo mode: a boss office with two seats queued at the door, a coffee room of idle seats, and three rig rooms with people working at their desks](docs/screenshot.png)
+![Rig HQ in demo mode, animated: seats typing at their desks, people walking the hallway between rooms, hand-off speech bubbles, idle seats with mugs in the coffee room, and a seat queued at the boss's door](docs/demo.gif)
 
 **Where someone is tells you their state:**
 
