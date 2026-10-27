@@ -308,12 +308,18 @@ function streamPane(req, res, session) {
 //   - a message goes through the daemon's own send route, exactly like
 //     `rig send --raw`: pasted, then Enter, and refused while the seat is at a
 //     prompt, so a message can never pick an option by accident;
-//   - a key from a fixed list goes straight to the pane with tmux send-keys.
+//   - a key from a fixed list, or typed characters, go straight to the pane
+//     with tmux send-keys (what the page sends while its screen has focus).
 //     Keys are how you answer a prompt (or Esc a busy seat). They don't go
 //     through the daemon: its prompt override only applies while it sees a
 //     prompt, and otherwise it would paste the key as text and press Enter.
-const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BTab", ..."123456789"]);
+const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BTab", "BSpace", "DC",
+  "Home", "End", "PPage", "NPage", ..."123456789"]);
 const MAX_MESSAGE = 8000;
+const MAX_TYPED = 500;
+// Typed characters are printable only: a control character (a newline, Ctrl-C,
+// an escape sequence) can only arrive as a named key from the list above.
+const printable = (t) => !/[\u0000-\u001f\u007f-\u009f]/.test(t);
 
 async function sendMessage(session, text) {
   const res = await fetch(DAEMON + "/api/transport/send", {
@@ -357,7 +363,7 @@ async function handleInput(req, res) {
   if (!inputAllowed(req)) return reply(403, { ok: false, error: "not from a Rig HQ page; reload it" });
   let body;
   try { body = await readJson(req, 4 * MAX_MESSAGE); } catch (e) { return reply(400, { ok: false, error: String(e.message ?? e) }); }
-  const { session, text, key } = body ?? {};
+  const { session, text, key, typed } = body ?? {};
   await ready;
   if (typeof session !== "string" || !knownSession(session)) return reply(404, { ok: false, error: "unknown seat" });
   try {
@@ -365,6 +371,12 @@ async function handleInput(req, res) {
       if (!KEYS.has(key)) return reply(400, { ok: false, error: `key ${key} isn't one Rig HQ sends` });
       await tmux(["send-keys", "-t", `=${session}:`, key]);
       console.log(`input: ${key} → ${session}`);
+      return reply(200, { ok: true });
+    }
+    if (typeof typed === "string" && typed) {
+      if (typed.length > MAX_TYPED || !printable(typed)) return reply(400, { ok: false, error: "typed text must be printable and short; use the message box" });
+      await tmux(["send-keys", "-t", `=${session}:`, "-l", typed]);
+      console.log(`input: typed ${typed.length} chars → ${session}`);
       return reply(200, { ok: true });
     }
     if (typeof text === "string" && text.trim()) {

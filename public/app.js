@@ -622,6 +622,10 @@ function openPane(seat) {
     term = new Terminal({ disableStdin: true, cursorBlink: false, scrollback: 2000, fontSize: 12,
       fontFamily: 'ui-monospace, "JetBrains Mono", Menlo, monospace', theme: { background: "#101217" } });
     term.open(document.getElementById("term"));
+    term.attachCustomKeyEventHandler(onTermKey);
+    term.textarea?.addEventListener("paste", onTermPaste, true);
+    term.textarea?.addEventListener("focus", () => noteFocus(true));
+    term.textarea?.addEventListener("blur", () => noteFocus(false));
     term.onScroll(() => {
       if (scrolledBack()) paneNote.textContent = `${paneMode()} · paused while you scroll back`;
       else if (pending) { const f = pending; pending = null; drawFrame(f); }
@@ -701,13 +705,14 @@ const inputResult = document.getElementById("pane-result");
 
 function showInput() {
   inputForm.hidden = !(world.input && inputToken);
-  inputResult.textContent = ""; inputResult.className = "";
+  inputResult.className = "";
+  inputResult.textContent = inputForm.hidden ? "" : "click the screen to type into it";
 }
 
-async function sendInput(payload, label) {
+async function sendInput(payload, label, { quiet = false } = {}) {
   const session = paneSeat;
   if (!session) return false;
-  inputResult.className = ""; inputResult.textContent = `sending ${label}…`;
+  if (!quiet) { inputResult.className = ""; inputResult.textContent = `sending ${label}…`; }
   let out;
   try {
     const r = await fetch("api/input", {
@@ -720,9 +725,67 @@ async function sendInput(payload, label) {
     out = { ok: false, error: "couldn't reach the rig-hq server" };
   }
   if (paneSeat !== session) return out.ok; // switched seats meanwhile
+  if (quiet && out.ok) return true; // keystrokes show up on the screen itself
   inputResult.className = out.ok ? "" : "err";
   inputResult.textContent = out.ok ? `sent ${label}${out.warning ? ` · ${out.warning}` : ""}` : out.error;
   return out.ok;
+}
+
+// Click the screen and the keyboard goes to the seat, as in `tmux attach`:
+// named keys (arrows, Enter, Esc, Tab, Backspace…) and typed characters are
+// sent in order, straight to the pane. Shortcuts with Ctrl/Cmd/Alt stay the
+// browser's (copy, reload…), and a paste lands in the message box for review.
+// The on-screen keys are for touch screens, which have no arrows or Esc.
+const NAMED = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", Enter: "Enter",
+  Escape: "Escape", Backspace: "BSpace", Delete: "DC", Home: "Home", End: "End", PageUp: "PPage", PageDown: "NPage" };
+const typing = () => !!(world.input && inputToken && paneSeat);
+const queue = [];
+let flushing = false;
+
+function onTermKey(e) {
+  if (!typing()) return true; // view only: let xterm (which ignores input) have it
+  if (e.type !== "keydown" || e.isComposing) return false;
+  let item = null;
+  if (e.ctrlKey || e.metaKey || e.altKey) return false; // the browser's shortcuts
+  if (e.key === "Tab") item = { key: e.shiftKey ? "BTab" : "Tab" };
+  else if (NAMED[e.key]) item = { key: NAMED[e.key] };
+  else if (e.key.length === 1) item = { typed: e.key };
+  if (!item) return false;
+  e.preventDefault(); e.stopPropagation(); // Esc goes to the seat, not to "close the screen"
+  enqueue(item);
+  return false;
+}
+
+function onTermPaste(e) {
+  if (!typing()) return;
+  e.preventDefault(); e.stopPropagation();
+  const text = e.clipboardData?.getData("text") ?? "";
+  inputText.value += text;
+  inputText.focus();
+  inputResult.className = ""; inputResult.textContent = "pasted into the message box: Send it, or edit first";
+}
+
+function enqueue(item) {
+  const last = queue[queue.length - 1];
+  if (item.typed && last?.typed && last.typed.length < 400) last.typed += item.typed; // coalesce a burst
+  else queue.push(item);
+  if (!flushing) flush();
+}
+
+async function flush() {
+  flushing = true;
+  while (queue.length) {
+    const item = queue.shift();
+    const ok = await sendInput(item, item.key ?? "text", { quiet: true });
+    if (!ok) { queue.length = 0; break; } // don't keep typing into a seat that refused
+  }
+  flushing = false;
+}
+
+function noteFocus(on) {
+  if (!typing()) return;
+  inputResult.className = "";
+  inputResult.textContent = on ? "typing goes to the seat · click outside to stop" : "click the screen to type into it";
 }
 
 document.getElementById("pane-keys").addEventListener("click", (e) => {

@@ -18,10 +18,11 @@ Hover anyone for their runtime, pod, state and work counts. Claude seats wear th
 
 **Watch a seat's screen:** click anyone (or a name in the waiting list) to open their terminal, live and in colour. By default it's view only: Rig HQ reads the seat's tmux pane and never types into it. Scroll up to read back and updates pause until you scroll down again; Esc closes it. This needs Rig HQ on the same machine as the rigs.
 
-**Type into a seat (opt-in):** start Rig HQ with `RIG_HQ_INPUT=on` and the screen gets a message box and a row of keys.
+**Type into a seat (opt-in):** start Rig HQ with `RIG_HQ_INPUT=on`, then click the seat's screen and type, as in `tmux attach`. Below the screen there's also a message box.
 
+- **Keyboard on the screen:** letters, digits, arrows, Enter, Esc, Tab, ⇧Tab, Backspace, Delete, Home, End and Page Up/Down go straight to the seat's pane, in order. That's how you answer a permission or selection prompt from the waiting line, or press Esc to stop a busy seat. While the screen has focus, Esc goes to the seat; click outside, then Esc, to close the screen. Shortcuts with Ctrl, Cmd or Alt stay the browser's, so Ctrl-C is never sent. A paste goes to the message box so you can check it first. On a touch screen, which has no arrows or Esc, a row of key buttons stands in.
 - **A message** goes through the daemon, the same as `rig send --raw`: it's pasted and Enter is pressed. OpenRig refuses it while the seat is at a prompt, so a message can't pick an option by accident.
-- **A key** (↑ ↓ ← → Enter Esc Tab ⇧Tab 1–4) goes straight to the seat's pane. That's how you answer a permission or selection prompt from the waiting line, or press Esc to stop a busy seat. Keys bypass OpenRig's prompt guard and its audit log, which records `rig send --dangerously-interact`. Rig HQ prints each one it sends to its own console.
+- Keys and typed characters bypass OpenRig's prompt guard and its audit log, which records `rig send --dangerously-interact`. Rig HQ prints each one it sends to its own console.
 
 ## Run it
 
@@ -60,7 +61,7 @@ If the rigs run on another machine, tunnel the port: `ssh -N -L 7480:127.0.0.1:7
 - Every 5 seconds it reads each seat's outbox (`/api/queue/outbox/list?senderSession=…`) for `rig send` messages. Sends without a sender session aren't recorded there, so they don't show.
 - It serves `public/` and pushes state and conversations to every open page over server-sent events (`/api/stream`).
 - A seat's screen comes from `tmux capture-pane`, read twice a second and sent only when it changes (`/api/pane`). Only seats the daemon lists can be opened, and tmux is called without a shell.
-- With input on, `/api/input` takes a message, which goes to the daemon's send route, or a key from a fixed list, which goes to `tmux send-keys`. It answers only seats the daemon lists.
+- With input on, `/api/input` takes a message, which goes to the daemon's send route, or a key from a fixed list or a run of printable characters, which go to `tmux send-keys` (`-l` for characters). It answers only seats the daemon lists.
 
 The page is plain JavaScript on a `<canvas>`. All the art is drawn in code, so there are no image assets. The screen panel uses [xterm.js](https://xtermjs.org), loaded from jsDelivr.
 
