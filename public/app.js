@@ -595,30 +595,39 @@ canvas.addEventListener("mouseleave", () => (tip.hidden = true));
 
 // ------------------------------------------------------------- seat screen
 
-// View-only terminal for one seat: the server streams its tmux pane (with
-// colours) whenever it changes. Scroll up to read back and updates pause;
-// scroll to the bottom and they resume.
+// A seat's terminal: the server streams its tmux pane (with colours) whenever
+// it changes. Scroll up to read back and updates pause; scroll to the bottom
+// and they resume. With input on (RIG_HQ_INPUT=on) you can also send the seat
+// a message or a key; otherwise it's view only.
 const pane = document.getElementById("pane");
 const paneTitle = document.getElementById("pane-title");
 const paneNote = document.getElementById("pane-note");
 let term = null, paneSource = null, paneCols = 0, pending = null, lastNote = "";
+let paneSeat = null, inputToken = null;
+const paneMode = () => (world.input && inputToken ? "you can type" : "view only");
 const scrolledBack = () => { const b = term.buffer.active; return b.viewportY < b.baseY; };
 
 function openPane(seat) {
   closePane();
   paneTitle.textContent = `${seat.session} · ${seat.state}`;
   pane.hidden = false;
+  paneSeat = seat.session;
   tip.hidden = true;
   if (world.demo) { paneNote.textContent = "demo mode has no real screens"; return; }
   if (world.screens === false) { paneNote.textContent = "seat screens are turned off (RIG_HQ_SCREENS=off)"; return; }
   if (typeof Terminal === "undefined") { paneNote.textContent = "terminal library failed to load (needs cdn.jsdelivr.net)"; return; }
-  paneNote.textContent = "view only · connecting…";
+  paneNote.textContent = `${paneMode()} · connecting…`;
+  showInput();
   if (!term) {
     term = new Terminal({ disableStdin: true, cursorBlink: false, scrollback: 2000, fontSize: 12,
       fontFamily: 'ui-monospace, "JetBrains Mono", Menlo, monospace', theme: { background: "#101217" } });
     term.open(document.getElementById("term"));
+    term.attachCustomKeyEventHandler(onTermKey);
+    term.textarea?.addEventListener("paste", onTermPaste, true);
+    term.textarea?.addEventListener("focus", () => noteFocus(true));
+    term.textarea?.addEventListener("blur", () => noteFocus(false));
     term.onScroll(() => {
-      if (scrolledBack()) paneNote.textContent = "view only · paused while you scroll back";
+      if (scrolledBack()) paneNote.textContent = `${paneMode()} · paused while you scroll back`;
       else if (pending) { const f = pending; pending = null; drawFrame(f); }
       else paneNote.textContent = lastNote;
     });
@@ -637,15 +646,15 @@ function listen(url) {
     drawFrame(f);
   };
   es.onerror = () => {
-    if (es.readyState !== EventSource.CLOSED) { paneNote.textContent = "view only · reconnecting…"; return; }
+    if (es.readyState !== EventSource.CLOSED) { paneNote.textContent = `${paneMode()} · reconnecting…`; return; }
     // The browser gave up after an error status: ask the server why, and retry
     // unless the answer is final (screens off, unknown seat).
     const retry = (ms) => setTimeout(() => { if (paneSource === es) listen(url); }, ms);
     fetch(url).then(async (r) => {
       if (paneSource !== es) { r.body?.cancel(); return; } // closed or switched meanwhile
-      if (r.status === 404) { paneNote.textContent = `view only · ${(await r.json().catch(() => ({}))).error ?? "unavailable"}`; return; }
+      if (r.status === 404) { paneNote.textContent = `${paneMode()} · ${(await r.json().catch(() => ({}))).error ?? "unavailable"}`; return; }
       r.body?.cancel();
-      paneNote.textContent = "view only · reconnecting…";
+      paneNote.textContent = `${paneMode()} · reconnecting…`;
       retry(2000);
     }).catch(() => retry(3000));
   };
@@ -655,7 +664,7 @@ function drawFrame(f) {
     if (f.cols !== paneCols) fitPane(f.cols);
     term.reset();
     term.write(f.screen.replace(/\n$/, "").replace(/\n/g, "\r\n"), () => term.scrollToBottom());
-    paneNote.textContent = lastNote = `view only · ${f.cols}×${f.rows} · live`;
+    paneNote.textContent = lastNote = `${paneMode()} · ${f.cols}×${f.rows} · live`;
 }
 
 // Match the seat's width exactly (rewrapping would scramble a TUI's layout), so
@@ -681,7 +690,122 @@ function fitPane(cols) {
 function closePane() {
   if (paneSource) { paneSource.close(); paneSource = null; }
   pane.hidden = true;
+  paneSeat = null;
+  inputForm.hidden = true;
 }
+
+// ------------------------------------------------------------- seat input
+
+// A message goes through the daemon (pasted, then Enter; refused while the seat
+// is at a prompt). A key goes straight to the pane, which is how you answer a
+// prompt. Every request carries the token from this page's hello.
+const inputForm = document.getElementById("pane-input");
+const inputText = document.getElementById("pane-text");
+const inputResult = document.getElementById("pane-result");
+
+function showInput() {
+  inputForm.hidden = !(world.input && inputToken);
+  inputResult.className = "";
+  inputResult.textContent = inputForm.hidden ? "" : "click the screen to type into it";
+}
+
+async function sendInput(payload, label, { quiet = false } = {}) {
+  const session = paneSeat;
+  if (!session) return false;
+  if (!quiet) { inputResult.className = ""; inputResult.textContent = `sending ${label}…`; }
+  let out;
+  try {
+    const r = await fetch("api/input", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-rig-hq-token": inputToken ?? "" },
+      body: JSON.stringify({ session, ...payload }),
+    });
+    out = await r.json().catch(() => ({ ok: false, error: `HTTP ${r.status}` }));
+  } catch (e) {
+    out = { ok: false, error: "couldn't reach the rig-hq server" };
+  }
+  if (paneSeat !== session) return out.ok; // switched seats meanwhile
+  if (quiet && out.ok) return true; // keystrokes show up on the screen itself
+  inputResult.className = out.ok ? "" : "err";
+  inputResult.textContent = out.ok ? `sent ${label}${out.warning ? ` · ${out.warning}` : ""}` : out.error;
+  return out.ok;
+}
+
+// Click the screen and the keyboard goes to the seat, as in `tmux attach`:
+// named keys (arrows, Enter, Esc, Tab, Backspace…) and typed characters are
+// sent in order, straight to the pane. Shortcuts with Ctrl/Cmd/Alt stay the
+// browser's (copy, reload…), and a paste lands in the message box for review.
+// The on-screen keys are for touch screens, which have no arrows or Esc.
+const NAMED = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right", Enter: "Enter",
+  Escape: "Escape", Backspace: "BSpace", Delete: "DC", Home: "Home", End: "End", PageUp: "PPage", PageDown: "NPage" };
+const typing = () => !!(world.input && inputToken && paneSeat);
+const queue = [];
+let flushing = false;
+
+function onTermKey(e) {
+  if (!typing()) return true; // view only: let xterm (which ignores input) have it
+  if (e.type !== "keydown" || e.isComposing) return false;
+  let item = null;
+  if (e.ctrlKey || e.metaKey || e.altKey) return false; // the browser's shortcuts
+  if (e.key === "Tab") item = { key: e.shiftKey ? "BTab" : "Tab" };
+  else if (NAMED[e.key]) item = { key: NAMED[e.key] };
+  else if (e.key.length === 1) item = { typed: e.key };
+  if (!item) return false;
+  e.preventDefault(); e.stopPropagation(); // Esc goes to the seat, not to "close the screen"
+  enqueue(item);
+  return false;
+}
+
+function onTermPaste(e) {
+  if (!typing()) return;
+  e.preventDefault(); e.stopPropagation();
+  const text = e.clipboardData?.getData("text") ?? "";
+  inputText.value += text;
+  inputText.focus();
+  inputResult.className = ""; inputResult.textContent = "pasted into the message box: Send it, or edit first";
+}
+
+function enqueue(item) {
+  const last = queue[queue.length - 1];
+  if (item.typed && last?.typed && last.typed.length < 400) last.typed += item.typed; // coalesce a burst
+  else queue.push(item);
+  if (!flushing) flush();
+}
+
+async function flush() {
+  flushing = true;
+  while (queue.length) {
+    const item = queue.shift();
+    const ok = await sendInput(item, item.key ?? "text", { quiet: true });
+    if (!ok) { queue.length = 0; break; } // don't keep typing into a seat that refused
+  }
+  flushing = false;
+}
+
+function noteFocus(on) {
+  if (!typing()) return;
+  inputResult.className = "";
+  inputResult.textContent = on ? "typing goes to the seat · click outside to stop" : "click the screen to type into it";
+}
+
+document.getElementById("pane-keys").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-key]");
+  if (b) sendInput({ key: b.dataset.key }, b.textContent);
+});
+inputForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = inputText.value;
+  if (!text.trim()) return;
+  const button = inputForm.querySelector("button[type=submit]");
+  button.disabled = true;
+  if (await sendInput({ text }, "message")) inputText.value = "";
+  button.disabled = false;
+  inputText.focus();
+});
+inputText.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); inputForm.requestSubmit(); }
+  if (e.key === "Escape") { e.stopPropagation(); inputText.blur(); } // Esc leaves the box; a second Esc closes the screen
+});
 
 document.getElementById("pane-close").addEventListener("click", closePane);
 window.addEventListener("resize", () => { if (!pane.hidden && term && paneCols) fitPane(paneCols); });
@@ -714,7 +838,7 @@ function connect() {
   const es = new EventSource("api/stream");
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
-    if (ev.kind === "hello") { history = ev.history ?? []; applyState(ev.state); }
+    if (ev.kind === "hello") { history = ev.history ?? []; inputToken = ev.token ?? null; applyState(ev.state); if (paneSeat) showInput(); }
     else if (ev.kind === "state") applyState(ev.state);
     else if (ev.kind === "activity") applyActivity(ev);
     else if (ev.kind === "talk") {

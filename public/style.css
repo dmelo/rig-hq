@@ -57,3 +57,17 @@ li .what { color: var(--muted); display: block; margin-top: 2px; overflow-wrap: 
 #pane-note { color: #9a9ca5; font-size: 12px; }
 #pane-close { background: none; border: 0; color: #e8e6df; font: inherit; font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; }
 #term { flex: 1; min-height: 0; padding: 6px; overflow: hidden; }
+#pane-input { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; background: #1c1f27; border-top: 1px solid #2c303b; }
+#pane-input[hidden] { display: none; }
+#pane-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+/* A real keyboard types into the screen itself; the key buttons are for touch. */
+@media (hover: hover) and (pointer: fine) { #pane-keys button { display: none; } }
+#term:focus-within { box-shadow: inset 0 0 0 1px #5b6cff; }
+#pane-input button { background: #2c303b; color: #e8e6df; border: 1px solid #3a3f4b; font: inherit; font-size: 12px; padding: 3px 9px; cursor: pointer; }
+#pane-input button:hover { background: #3a3f4b; }
+#pane-input button:disabled { opacity: .5; cursor: default; }
+#pane-result { margin-left: 8px; color: #9a9ca5; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+#pane-result.err { color: #ff8a7a; }
+#pane-compose { display: flex; gap: 6px; }
+#pane-text { flex: 1; resize: none; background: #101217; color: #e8e6df; border: 1px solid #3a3f4b; font: 12px ui-monospace, "JetBrains Mono", Menlo, monospace; padding: 5px 7px; }
+#pane-text:focus { outline: 1px solid #68b; }

@@ -1,20 +1,23 @@
 // rig-hq: a pixel office for OpenRig rigs.
 //
-// Read-only bridge between the OpenRig daemon and the browser. It polls the
-// daemon for rigs and seats, keeps one upstream connection to the daemon's
-// event stream, and fans a small, normalised set of events out to every open
-// page over SSE. It never writes to the daemon.
+// Bridge between the OpenRig daemon and the browser. It polls the daemon for
+// rigs and seats, keeps one upstream connection to the daemon's event stream,
+// and fans a small, normalised set of events out to every open page over SSE.
+// It is read-only unless RIG_HQ_INPUT=on, which lets the page send a seat a
+// message (through the daemon) or a key (straight to its tmux pane).
 //
 //   PORT         (default 7480)                    where the office is served
 //   HOST         (default 127.0.0.1)               bind address
 //   DAEMON       (default http://127.0.0.1:7433)   the OpenRig daemon
 //   RIG_HQ_BOSS  (default "You")                   the name on the boss's door
 //   RIG_HQ_SCREENS (default on)                    "off" hides seat screens (they show whatever the agent printed)
+//   RIG_HQ_INPUT (default off)                     "on" lets the page type into seats (needs screens on)
 //   RIG_HQ_ALLOWED_HOSTS                           extra Host names to accept, comma-separated (e.g. a reverse-proxy name)
 //   DEMO=1 or --demo                               invented rigs, no daemon needed
 
 import http from "node:http";
 import { execFile } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import { hostname, networkInterfaces } from "node:os";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
@@ -27,11 +30,13 @@ const PUBLIC = fileURLToPath(new URL("./public/", import.meta.url));
 const BOSS = process.env.RIG_HQ_BOSS || "You";
 const DEMO = process.env.DEMO === "1" || process.argv.includes("--demo");
 const SCREENS = process.env.RIG_HQ_SCREENS !== "off";
+const INPUT = process.env.RIG_HQ_INPUT === "on";
+const INPUT_TOKEN = randomBytes(24).toString("hex"); // handed only to pages this server serves (see /api/input)
 const POLL_MS = 4000;
 const HISTORY = 60; // conversations kept for pages that open later
 const HISTORY_WINDOW_MS = 6 * 3600 * 1000; // replayed conversations younger than this are kept
 
-const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO, screens: SCREENS && !DEMO };
+const state = { rigs: [], updatedAt: null, daemonOk: false, error: null, boss: BOSS, demo: DEMO, screens: SCREENS && !DEMO, input: INPUT && SCREENS && !DEMO };
 const history = []; // recent conversation events, oldest first
 const seenOutbox = new Set(); // outboxIds already turned into conversations
 let lastEventId = null; // last SSE id from the daemon, sent back as Last-Event-ID on reconnect
@@ -297,6 +302,95 @@ function streamPane(req, res, session) {
   req.on("close", () => { closed = true; clearTimeout(timer); });
 }
 
+// ------------------------------------------------------------- seat input
+
+// Off unless RIG_HQ_INPUT=on. Two ways in, for seats the daemon lists only:
+//   - a message goes through the daemon's own send route, exactly like
+//     `rig send --raw`: pasted, then Enter, and refused while the seat is at a
+//     prompt, so a message can never pick an option by accident;
+//   - a key from a fixed list, or typed characters, go straight to the pane
+//     with tmux send-keys (what the page sends while its screen has focus).
+//     Keys are how you answer a prompt (or Esc a busy seat). They don't go
+//     through the daemon: its prompt override only applies while it sees a
+//     prompt, and otherwise it would paste the key as text and press Enter.
+const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BTab", "BSpace", "DC",
+  "Home", "End", "PPage", "NPage", ..."123456789"]);
+const MAX_MESSAGE = 8000;
+const MAX_TYPED = 500;
+// Typed characters are printable only: a control character (a newline, Ctrl-C,
+// an escape sequence) can only arrive as a named key from the list above.
+const printable = (t) => !/[\u0000-\u001f\u007f-\u009f]/.test(t);
+
+async function sendMessage(session, text) {
+  const res = await fetch(DAEMON + "/api/transport/send", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session, text, deliveryId: randomUUID() }),
+    signal: AbortSignal.timeout(20000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) return { ok: false, error: data.error ?? `daemon answered HTTP ${res.status}` };
+  if (data.outcome === "retained") return { ok: false, error: `retained, not delivered. ${data.warning ?? ""}`.trim() };
+  return { ok: true, warning: data.warning ?? null };
+}
+
+// A cross-site page can POST here (its request would carry Host 127.0.0.1), so
+// a write must also come from one of our own pages: an Origin we answer to, a
+// JSON body (which a cross-site form can't send without a preflight we never
+// grant), and the token that only our pages receive.
+function inputAllowed(req) {
+  let origin;
+  try { origin = new URL(req.headers.origin ?? ""); } catch { return false; }
+  const name = origin.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return allowedHosts.has(name)
+    && String(req.headers["content-type"] ?? "").startsWith("application/json")
+    && req.headers["x-rig-hq-token"] === INPUT_TOKEN;
+}
+
+async function readJson(req, limit) {
+  let body = "";
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > limit) throw new Error("request too large");
+  }
+  return JSON.parse(body);
+}
+
+async function handleInput(req, res) {
+  const reply = (status, obj) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+  if (req.method !== "POST") return reply(405, { ok: false, error: "POST only" });
+  if (!state.input) return reply(403, { ok: false, error: "input is off (start Rig HQ with RIG_HQ_INPUT=on)" });
+  if (!inputAllowed(req)) return reply(403, { ok: false, error: "not from a Rig HQ page; reload it" });
+  let body;
+  try { body = await readJson(req, 4 * MAX_MESSAGE); } catch (e) { return reply(400, { ok: false, error: String(e.message ?? e) }); }
+  const { session, text, key, typed } = body ?? {};
+  await ready;
+  if (typeof session !== "string" || !knownSession(session)) return reply(404, { ok: false, error: "unknown seat" });
+  try {
+    if (typeof key === "string") {
+      if (!KEYS.has(key)) return reply(400, { ok: false, error: `key ${key} isn't one Rig HQ sends` });
+      await tmux(["send-keys", "-t", `=${session}:`, key]);
+      console.log(`input: ${key} → ${session}`);
+      return reply(200, { ok: true });
+    }
+    if (typeof typed === "string" && typed) {
+      if (typed.length > MAX_TYPED || !printable(typed)) return reply(400, { ok: false, error: "typed text must be printable and short; use the message box" });
+      await tmux(["send-keys", "-t", `=${session}:`, "-l", typed]);
+      console.log(`input: typed ${typed.length} chars → ${session}`);
+      return reply(200, { ok: true });
+    }
+    if (typeof text === "string" && text.trim()) {
+      if (text.length > MAX_MESSAGE) return reply(400, { ok: false, error: `messages are capped at ${MAX_MESSAGE} characters` });
+      const result = await sendMessage(session, text);
+      console.log(`input: message (${text.length} chars) → ${session}: ${result.ok ? "sent" : result.error}`);
+      return reply(result.ok ? 200 : 409, result);
+    }
+    return reply(400, { ok: false, error: "nothing to send" });
+  } catch (e) {
+    return reply(502, { ok: false, error: String(e.message ?? e).split("\n")[0] });
+  }
+}
+
 // ---------------------------------------------------------------- host check
 
 // Only answer requests addressed to this machine by a name it actually has, so
@@ -332,7 +426,7 @@ const server = http.createServer(async (req, res) => {
   }
   if (url.pathname === "/api/stream") {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    res.write(`data: ${JSON.stringify({ kind: "hello", state, history })}\n\n`);
+    res.write(`data: ${JSON.stringify({ kind: "hello", state, history, token: state.input ? INPUT_TOKEN : null })}\n\n`);
     clients.add(res);
     req.on("close", () => clients.delete(res));
     return;
@@ -346,6 +440,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     streamPane(req, res, session);
+    return;
+  }
+  if (url.pathname === "/api/input") {
+    await handleInput(req, res);
     return;
   }
   if (url.pathname === "/api/state") {

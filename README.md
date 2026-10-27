@@ -16,7 +16,13 @@ A pixel-art office for your AI coding agents. Rig HQ shows the [OpenRig](https:/
 
 Hover anyone for their runtime, pod, state and work counts. Claude seats wear their pod's colour; Codex seats wear orange with a visor.
 
-**Watch a seat's screen:** click anyone (or a name in the waiting list) to open their terminal, live and in colour. It's view only: Rig HQ reads the seat's tmux pane and never types into it. Scroll up to read back and updates pause until you scroll down again; Esc closes it. This needs Rig HQ on the same machine as the rigs.
+**Watch a seat's screen:** click anyone (or a name in the waiting list) to open their terminal, live and in colour. By default it's view only: Rig HQ reads the seat's tmux pane and never types into it. Scroll up to read back and updates pause until you scroll down again; Esc closes it. This needs Rig HQ on the same machine as the rigs.
+
+**Type into a seat (opt-in):** start Rig HQ with `RIG_HQ_INPUT=on`, then click the seat's screen and type, as in `tmux attach`. Below the screen there's also a message box.
+
+- **Keyboard on the screen:** letters, digits, arrows, Enter, Esc, Tab, ⇧Tab, Backspace, Delete, Home, End and Page Up/Down go straight to the seat's pane, in order. That's how you answer a permission or selection prompt from the waiting line, or press Esc to stop a busy seat. While the screen has focus, Esc goes to the seat; click outside, then Esc, to close the screen. Shortcuts with Ctrl, Cmd or Alt stay the browser's, so Ctrl-C is never sent. A paste goes to the message box so you can check it first. On a touch screen, which has no arrows or Esc, a row of key buttons stands in.
+- **A message** goes through the daemon, the same as `rig send --raw`: it's pasted and Enter is pressed. OpenRig refuses it while the seat is at a prompt, so a message can't pick an option by accident.
+- Keys and typed characters bypass OpenRig's prompt guard and its audit log, which records `rig send --dangerously-interact`. Rig HQ prints each one it sends to its own console.
 
 ## Run it
 
@@ -41,19 +47,21 @@ node server.mjs --demo
 | `RIG_HQ_BOSS` | `You` | the name on your office door (`?boss=Name` in the URL overrides it for one page) |
 | `RIG_HQ_ALLOWED_HOSTS` | | extra host names to answer to, comma-separated. Rig HQ only answers requests addressed to this machine (loopback, its hostname, its IP addresses), so a web page can't reach it through DNS rebinding; behind a reverse proxy with its own name, add that name here |
 | `RIG_HQ_SCREENS` | on | `off` hides seat screens. A screen shows whatever the agent printed, secrets included, to anyone who can open the page |
+| `RIG_HQ_INPUT` | off | `on` lets the page type into seats (needs screens on; not in demo mode). Anyone who can open the page can then drive your agents, so keep `HOST` on loopback. Writes must come from a Rig HQ page: the request needs a matching `Origin`, a JSON body and a token that only the page receives |
 | `DEMO` | | `1` for demo mode, same as `--demo` |
 
 If the rigs run on another machine, tunnel the port: `ssh -N -L 7480:127.0.0.1:7480 <host>`, then open `http://localhost:7480`.
 
 ## How it works
 
-`server.mjs` is a small read-only bridge; it never writes to the daemon.
+`server.mjs` is a small bridge. It is read-only unless `RIG_HQ_INPUT=on`, and even then the only write it makes to the daemon is a message send (`POST /api/transport/send`).
 
 - Every 4 seconds it reads the rigs (`/api/ps`) and each rig's seats (`/api/rigs/:id/nodes`). Working or idle is the daemon's reconciled activity (`activityState.display`, what `rig ps` and the OpenRig TUI show). "Needs you" mirrors the daemon's attention rule: a pending-input count, or the raw hook state for runtimes whose "nothing pending" isn't trusted yet (Codex, in 0.6.5), or a held, errored or flagged seat. The seat list doesn't say which runtimes are trusted, so Rig HQ assumes only Claude Code is.
 - It follows the daemon's event stream (`/api/events`) for queue traffic (`queue.created`, `queue.handed_off`, `queue.claimed`, and `queue.updated` to done) and for one seat answering another's prompt (`transport.prompt_override`). Activity events (`agent.activity`, `seat.activity_changed`) only trigger an early re-read, never a state change by themselves. The first connection replays the daemon's retained history; reconnects resume with `Last-Event-ID`.
 - Every 5 seconds it reads each seat's outbox (`/api/queue/outbox/list?senderSession=…`) for `rig send` messages. Sends without a sender session aren't recorded there, so they don't show.
 - It serves `public/` and pushes state and conversations to every open page over server-sent events (`/api/stream`).
 - A seat's screen comes from `tmux capture-pane`, read twice a second and sent only when it changes (`/api/pane`). Only seats the daemon lists can be opened, and tmux is called without a shell.
+- With input on, `/api/input` takes a message, which goes to the daemon's send route, or a key from a fixed list or a run of printable characters, which go to `tmux send-keys` (`-l` for characters). It answers only seats the daemon lists.
 
 The page is plain JavaScript on a `<canvas>`. All the art is drawn in code, so there are no image assets. The screen panel uses [xterm.js](https://xtermjs.org), loaded from jsDelivr.
 

@@ -17,6 +17,27 @@
     <div id="pane" hidden>
       <header><b id="pane-title"></b><span id="pane-note">view only</span><button id="pane-close" title="Close (Esc)">×</button></header>
       <div id="term"></div>
+      <form id="pane-input" hidden>
+        <div id="pane-keys">
+          <button type="button" data-key="Up" title="Up arrow">↑</button>
+          <button type="button" data-key="Down" title="Down arrow">↓</button>
+          <button type="button" data-key="Left" title="Left arrow">←</button>
+          <button type="button" data-key="Right" title="Right arrow">→</button>
+          <button type="button" data-key="Enter">Enter</button>
+          <button type="button" data-key="Escape">Esc</button>
+          <button type="button" data-key="Tab">Tab</button>
+          <button type="button" data-key="BTab" title="Shift+Tab">⇧Tab</button>
+          <button type="button" data-key="1">1</button>
+          <button type="button" data-key="2">2</button>
+          <button type="button" data-key="3">3</button>
+          <button type="button" data-key="4">4</button>
+          <span id="pane-result" role="status"></span>
+        </div>
+        <div id="pane-compose">
+          <textarea id="pane-text" rows="2" placeholder="Message this seat · Enter sends, Shift+Enter adds a line"></textarea>
+          <button type="submit">Send</button>
+        </div>
+      </form>
     </div>
   </section>
   <aside>
