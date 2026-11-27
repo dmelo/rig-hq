@@ -1,8 +1,8 @@
 // rig-hq: a pixel office for OpenRig rigs.
 //
-// Bridge between the OpenRig daemon and the browser. It polls the daemon for
-// rigs and seats, keeps one upstream connection to the daemon's event stream,
-// and fans a small, normalised set of events out to every open page over SSE.
+// Bridge between the OpenRig daemon and the browser. It keeps one upstream
+// connection to the daemon's event stream, reads rigs and seats when that
+// stream says they changed (and only while a page is open), and fans a small, normalised set of events out to every open page over SSE.
 // It is read-only unless RIG_HQ_INPUT=on, which lets the page send a seat a
 // message (through the daemon) or a key (straight to its tmux pane).
 //
@@ -32,7 +32,7 @@ const DEMO = process.env.DEMO === "1" || process.argv.includes("--demo");
 const SCREENS = process.env.RIG_HQ_SCREENS !== "off";
 const INPUT = process.env.RIG_HQ_INPUT === "on";
 const INPUT_TOKEN = randomBytes(24).toString("hex"); // handed only to pages this server serves (see /api/input)
-const POLL_MS = 4000;
+const REPLAY = 200; // events replayed on the first connect to the daemon's stream
 const HISTORY = 60; // conversations kept for pages that open later
 const HISTORY_WINDOW_MS = 6 * 3600 * 1000; // replayed conversations younger than this are kept
 
@@ -87,81 +87,160 @@ function seatState(node) {
 }
 
 let markReady;
-const ready = new Promise((r) => (markReady = r)); // settles after the first poll, success or not
+const ready = new Promise((r) => (markReady = r)); // settles after the first read, success or not
 
-// One poll at a time: nudges can arrive faster than a poll completes, and an
-// older poll finishing last would overwrite fresher state. A poll asked for
-// while one runs is done once, right after it.
-let polling = false, pollAgain = false;
-async function poll() {
-  if (polling) { pollAgain = true; return; }
-  polling = true;
+// Reads are driven by the daemon's event stream, not a timer. Its events are
+// change notifications only (a seat name, not its new state), so an event
+// marks that seat's rig stale and the rig's seat list is read again. A busy
+// rig emits many events a second; each rig is read at most once per
+// RIG_MIN_MS, and every event in between is covered by that one read.
+//   - rig.* events (created, deleted, archived…) and events naming a seat we
+//     don't know yet ask for a full read (/api/ps plus every rig);
+//   - a full read also runs every FULL_MS while a page is open, in case an
+//     event was missed or a change emitted none;
+//   - nothing is read while no page is open: the state is refreshed when one
+//     connects. The daemon is shared with the rigs themselves, and a polling
+//     viewer nobody looks at competes with them for it.
+// One read at a time, so an older read finishing last can't overwrite a newer one.
+const RIG_MIN_MS = 5000, FULL_MS = 60000;
+const watching = () => clients.size > 0;
+const dirty = new Set(); // rig ids to read again
+const lastRigRead = new Map(); // rig id -> when it was last read
+let fullDue = true, lastFull = 0, reading = false, readTimer = null;
+// A failed read (usually the daemon timing out under load) doubles the gap
+// before the next one, up to FULL_MS, so a struggling daemon gets less traffic.
+let gapMs = RIG_MIN_MS;
+const readOk = () => { gapMs = RIG_MIN_MS; };
+const readFailed = () => { gapMs = Math.min(FULL_MS, gapMs * 2); };
+
+const rigOf = (session) => state.rigs.find((r) => r.seats.some((s) => s.session === session))?.id ?? null;
+
+function markRig(rigId) {
+  if (rigId && state.rigs.some((r) => r.id === rigId)) dirty.add(rigId);
+  else fullDue = true;
+  schedule();
+}
+function markSessions(sessions) {
+  for (const s of sessions) if (s) markRig(rigOf(s));
+}
+function markFull() { fullDue = true; schedule(); }
+
+function nextReadIn(now) {
+  let wait = Infinity;
+  if (fullDue) wait = Math.max(0, lastFull + gapMs - now);
+  for (const id of dirty) wait = Math.min(wait, Math.max(0, (lastRigRead.get(id) ?? 0) + gapMs - now));
+  return wait;
+}
+
+function schedule() {
+  if (readTimer || reading || !watching()) return;
+  const wait = nextReadIn(Date.now());
+  if (wait === Infinity) return;
+  readTimer = setTimeout(() => { readTimer = null; pump(); }, wait);
+}
+
+async function pump() {
+  if (reading) return;
+  reading = true;
   try {
-    await pollOnce();
+    const now = Date.now();
+    if (fullDue && now - lastFull >= gapMs) await readAll();
+    else {
+      const due = [...dirty].filter((id) => now - (lastRigRead.get(id) ?? 0) >= gapMs);
+      for (const id of due) { dirty.delete(id); await readRig(id); }
+      if (due.length) broadcast({ kind: "state", state });
+    }
   } finally {
-    polling = false;
-    if (pollAgain) { pollAgain = false; poll(); }
+    reading = false;
+    schedule();
   }
 }
 
-async function pollOnce() {
+function seatsOf(nodes) {
+  return nodes
+    .filter((n) => n.nodeKind === "agent")
+    .map((n) => ({
+      session: n.canonicalSessionName,
+      seat: n.canonicalSessionName.split("@")[0],
+      logicalId: n.logicalId,
+      pod: n.podNamespace,
+      runtime: n.runtime,
+      lifecycle: n.lifecycleState,
+      ...seatState(n),
+      pending: n.pendingWorkCount ?? 0,
+      inProgress: n.inProgressWorkCount ?? 0,
+      lastActivityAt: n.lastActivityAt ?? null,
+      attach: n.tmuxAttachCommand ?? null,
+    }))
+    .sort((a, b) => a.logicalId.localeCompare(b.logicalId));
+}
+
+async function readAll() {
+  fullDue = false;
+  lastFull = Date.now();
   try {
     const ps = await getJson("/api/ps");
     const rigs = [];
     for (const r of ps.filter((r) => !r.isArchived)) {
-      const nodes = await getJson(`/api/rigs/${r.rigId}/nodes`);
-      rigs.push({
-        id: r.rigId,
-        name: r.name,
-        status: r.status,
-        seats: nodes
-          .filter((n) => n.nodeKind === "agent")
-          .map((n) => ({
-            session: n.canonicalSessionName,
-            seat: n.canonicalSessionName.split("@")[0],
-            logicalId: n.logicalId,
-            pod: n.podNamespace,
-            runtime: n.runtime,
-            lifecycle: n.lifecycleState,
-            ...seatState(n),
-            pending: n.pendingWorkCount ?? 0,
-            inProgress: n.inProgressWorkCount ?? 0,
-            lastActivityAt: n.lastActivityAt ?? null,
-            attach: n.tmuxAttachCommand ?? null,
-          }))
-          .sort((a, b) => a.logicalId.localeCompare(b.logicalId)),
-      });
+      lastRigRead.set(r.rigId, Date.now());
+      dirty.delete(r.rigId);
+      rigs.push({ id: r.rigId, name: r.name, status: r.status, seats: seatsOf(await getJson(`/api/rigs/${r.rigId}/nodes`)) });
     }
     Object.assign(state, { rigs, updatedAt: new Date().toISOString(), daemonOk: true, error: null });
-    markReady();
+    readOk();
   } catch (e) {
     Object.assign(state, { daemonOk: false, error: String(e.message ?? e) });
-    markReady();
+    readFailed();
+    fullDue = true; // try again after the backoff gap
   }
+  markReady();
   broadcast({ kind: "state", state });
 }
 
-// An activity event means something changed: poll soon (coalesced), rather
-// than waiting up to POLL_MS.
-let nudgeTimer = null;
-function nudge() {
-  if (!nudgeTimer) nudgeTimer = setTimeout(() => { nudgeTimer = null; poll(); }, 700);
+async function readRig(id) {
+  lastRigRead.set(id, Date.now());
+  try {
+    const seats = seatsOf(await getJson(`/api/rigs/${id}/nodes`));
+    const rig = state.rigs.find((r) => r.id === id);
+    if (rig) rig.seats = seats;
+    Object.assign(state, { updatedAt: new Date().toISOString(), daemonOk: true, error: null });
+    readOk();
+  } catch (e) {
+    Object.assign(state, { daemonOk: false, error: String(e.message ?? e) });
+    readFailed();
+    dirty.add(id); // read it again after the backoff gap
+  }
 }
 
 // ----------------------------------------------------------------- rig send
 
 // `rig send` messages aren't in the event stream, but a send with a known
-// sender session is recorded in that sender's outbox (OpenRig 0.6.5). Poll each
-// seat's outbox and turn new entries into conversations.
+// sender session is recorded in that sender's outbox (OpenRig 0.6.5). Read the
+// outboxes of seats that showed activity in the last ACTIVE_MS (a seat that
+// sends is a seat that is working), every OUTBOX_MS while a page is open, and
+// every seat's once when a page connects; turn new entries into conversations.
+const OUTBOX_MS = 5000, ACTIVE_MS = 60000;
+const activeAt = new Map(); // session -> last event naming it
+function touch(sessions) {
+  const now = Date.now();
+  for (const s of sessions) if (s) activeAt.set(s, now);
+}
 function outboxSummary(body) {
   const parts = String(body ?? "").split(/\n---\n?/);
   const text = (parts[1] ?? parts[0]).replace(/^[\w.-]+:\s*/, "").replace(/\s+/g, " ").trim();
   return text.slice(0, 200);
 }
 
-let outboxPrimed = false;
-async function pollOutboxes() {
-  const sessions = state.rigs.flatMap((r) => r.seats.map((s) => s.session));
+let outboxPrimed = false, outboxBusy = false;
+async function pollOutboxes({ all = false } = {}) {
+  if (outboxBusy) return;
+  outboxBusy = true;
+  try { await readOutboxes(all); } finally { outboxBusy = false; }
+}
+async function readOutboxes(all) {
+  const now = Date.now();
+  const sessions = state.rigs.flatMap((r) => r.seats.map((s) => s.session))
+    .filter((s) => all || now - (activeAt.get(s) ?? 0) < ACTIVE_MS);
   const fresh = [];
   await Promise.all(sessions.map(async (session) => {
     try {
@@ -204,12 +283,26 @@ function normalise(ev) {
       return { kind: "done", session: ev.actorSession, qitem: ev.qitemId, at };
     case "queue.claimed":
       return { kind: "claimed", session: ev.destinationSession, summary: ev.summary, qitem: ev.qitemId, at };
-    case "agent.activity":
-    case "seat.activity_changed": // covers Codex, whose state comes from sampling, not hooks
-    case "seat.attention_cleared":
-      return { kind: "nudge", at }; // re-poll now instead of trusting the raw event
     default:
       return null;
+  }
+}
+
+// What an event makes stale. The display isn't built from the event itself:
+// "needs you" comes from the daemon's reconciled state, which only a read has.
+const SESSION_FIELDS = ["sessionName", "canonicalSessionName", "sourceSession", "destinationSession",
+  "fromSession", "toSession", "actorSession"];
+function route(ev) {
+  const type = String(ev.type ?? "");
+  if (type.startsWith("rig.")) return markFull(); // a rig appeared, went or changed shape
+  if (type === "seat.rung_health") return; // periodic health, not a change
+  const sessions = SESSION_FIELDS.map((f) => ev[f]).filter((s) => typeof s === "string" && s);
+  if (type === "agent.activity" || type.startsWith("seat.") || type.startsWith("node.")
+      || type.startsWith("session.") || type.startsWith("queue.")) {
+    touch(sessions);
+    if (ev.rigId && state.rigs.some((r) => r.id === ev.rigId)) markRig(ev.rigId);
+    else if (sessions.length) markSessions(sessions); // an unknown seat asks for a full read
+    else markFull();
   }
 }
 
@@ -217,10 +310,13 @@ async function follow() {
   const started = Date.now();
   for (;;) {
     try {
-      // OpenRig 0.6.5 resumes from Last-Event-ID; only the very first connect replays history.
+      // A reconnect resumes from Last-Event-ID. The first connect asks for the newest
+      // REPLAY events only: without `replay` the daemon sends its whole log, which
+      // on a long-lived daemon is hundreds of thousands of events and stalls it.
+      // (Last-Event-ID wins over `replay` when both are sent.)
       const headers = { accept: "text/event-stream" };
       if (lastEventId) headers["last-event-id"] = lastEventId;
-      const res = await fetch(DAEMON + "/api/events", { headers });
+      const res = await fetch(`${DAEMON}/api/events?replay=${REPLAY}`, { headers });
       if (!res.ok || !res.body) throw new Error(`events: HTTP ${res.status}`);
       const dec = new TextDecoder();
       let buf = "";
@@ -234,13 +330,12 @@ async function follow() {
           if (!line.startsWith("data: ")) continue;
           let ev;
           try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+          // The first connect replays the newest REPLAY events.
+          const replay = (ts(ev.createdAt) || Date.now()) < started - 5000;
+          if (!replay) route(ev);
           const n = normalise(ev);
           if (!n) continue;
-          // The stream replays history from the first event on every connect.
-          const replay = n.at < started - 5000;
-          if (n.kind === "nudge") {
-            if (!replay) nudge();
-          } else if (n.kind === "done" || n.kind === "claimed") {
+          if (n.kind === "done" || n.kind === "claimed") {
             if (!replay) broadcast(n); // a moment's bubble, not history
           } else if (n.kind === "talk") {
             if (replay && n.at < Date.now() - HISTORY_WINDOW_MS) continue;
@@ -427,8 +522,14 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/stream") {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
     res.write(`data: ${JSON.stringify({ kind: "hello", state, history, token: state.input ? INPUT_TOKEN : null })}\n\n`);
+    const first = !watching();
     clients.add(res);
     req.on("close", () => clients.delete(res));
+    if (first && !DEMO) { // nothing was read while nobody watched: catch up
+      if (Date.now() - lastFull >= RIG_MIN_MS) fullDue = true;
+      schedule();
+      pollOutboxes({ all: true });
+    }
     return;
   }
   if (url.pathname === "/api/pane") {
@@ -468,8 +569,9 @@ if (DEMO) {
   startDemo({ state, history, broadcast, HISTORY });
   markReady();
 } else {
-  poll().then(pollOutboxes);
-  setInterval(poll, POLL_MS);
-  setInterval(pollOutboxes, 5000);
+  // One read at start, watched or not, so seat screens and input know the seats.
+  pump().then(() => pollOutboxes({ all: true }));
+  setInterval(() => { if (watching()) markFull(); }, FULL_MS);
+  setInterval(() => { if (watching()) pollOutboxes(); }, OUTBOX_MS);
   follow();
 }
